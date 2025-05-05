@@ -327,19 +327,35 @@ def extract_contact_info(email_doc):
     """
     contact_info = {"new_contact_email": "", "new_contact_name": "", "new_contact_phone": ""}
     
-    # Use metadata from API response
-    meta = email_doc.get("metadata", {})
-    ents = meta.get("entities", {})
+    # First try to get entities directly from the stored API response
+    entities = email_doc.get("entities", {})
     
-    # Extract emails, phones, and people from entities
-    if ents.get("emails"):
-        contact_info["new_contact_email"] = ents["emails"][0]
-    if ents.get("phones"):
-        contact_info["new_contact_phone"] = ents["phones"][0]
-    if ents.get("people"):
-        contact_info["new_contact_name"] = ents["people"][0]
-
-    # Additional extraction from special cases
+    # If not found directly, try looking in metadata
+    if not entities:
+        meta = email_doc.get("metadata", {})
+        entities = meta.get("entities", {})
+    
+    # Direct extraction from entities
+    if entities:
+        # Extract emails
+        emails = entities.get("emails", [])
+        if emails and isinstance(emails, list) and len(emails) > 0:
+            contact_info["new_contact_email"] = emails[0]
+        
+        # Extract phones
+        phones = entities.get("phones", [])
+        if phones and isinstance(phones, list) and len(phones) > 0:
+            contact_info["new_contact_phone"] = phones[0]
+        
+        # Extract people
+        people = entities.get("people", [])
+        if people and isinstance(people, list) and len(people) > 0:
+            contact_info["new_contact_name"] = people[0]
+    
+    # Additional extraction from special structures
+    # First check metadata
+    meta = email_doc.get("metadata", {})
+    
     # Left company info
     left_company = meta.get("left_company", {})
     if left_company:
@@ -369,7 +385,17 @@ def extract_contact_info(email_doc):
             # Name
             if contact_person.get("name") and not contact_info["new_contact_name"]:
                 contact_info["new_contact_name"] = contact_person.get("name", "")
-
+    
+    # Direct access to ooo_contact_person if available
+    ooo_contact = email_doc.get("ooo_contact_person", {})
+    if ooo_contact:
+        if ooo_contact.get("email") and not contact_info["new_contact_email"]:
+            contact_info["new_contact_email"] = ooo_contact.get("email", "")
+        if ooo_contact.get("phone") and not contact_info["new_contact_phone"]:
+            contact_info["new_contact_phone"] = ooo_contact.get("phone", "")
+        if ooo_contact.get("name") and not contact_info["new_contact_name"]:
+            contact_info["new_contact_name"] = ooo_contact.get("name", "")
+    
     return contact_info
 
 def build_reply_summary(email_doc, contact_info):

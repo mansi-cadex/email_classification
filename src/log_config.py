@@ -10,7 +10,7 @@ MAX_LOG_SIZE = 5 * 1024 * 1024  # 5 MB
 BACKUP_COUNT = 5  # Keep 5 backup files
 
 # Define a SPECIFIC log directory path - update this to your desired location
-CUSTOM_LOG_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "your_logs_folder")
+CUSTOM_LOG_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "logs")
 
 # Ensure directory exists
 try:

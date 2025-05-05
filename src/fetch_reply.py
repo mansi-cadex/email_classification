@@ -26,7 +26,7 @@ except ImportError:
 load_dotenv()
 
 # Constants - moved from code to top level
-REFRESH_TOKEN_PATH = "client_side/refresh_token.txt"
+REFRESH_TOKEN_PATH = "refresh_token.txt"
 MS_GRAPH_TIMEOUT = 30  # seconds
 AUTH_RETRY_ATTEMPTS = 3
 EMAIL_FETCH_TOP = 1000  # Maximum folders to fetch
@@ -73,8 +73,17 @@ def classify_email_via_api(subject: str, body: str) -> Dict:
         )
         response.raise_for_status()
         result = response.json()
-        logger.info(f"Classification API returned: {result}")
-        return result
+        
+        # Updated to handle the new response format
+        if "status" in result and result["status"] == "success" and "results" in result:
+            # Get the first result from the results array
+            classification = result["results"][0]
+            logger.info(f"Classification API returned: {classification}")
+            return classification
+        else:
+            # Fallback for unexpected response format
+            logger.warning(f"Unexpected response format from API: {result}")
+            return {"label": "manual_review", "confidence": 0.0, "method": "api_error"}
     except Exception as e:
         logger.error(f"Error calling classification API: {e}")
         return {"label": "manual_review", "confidence": 0.0, "method": "api_error"}
@@ -448,15 +457,10 @@ class EmailProcessor:
                 logger.exception(f"Error during classification for email {message_id}. Using manual_review:")
                 label = "manual_review"
                 confidence = 0.0
+                classification_result = {"label": label, "confidence": confidence, "method": "api_error"}
             
             # Extract entities for response generation
-            entities = {}
-            try:
-                # We could make another API call to extract entities, but for now we'll rely
-                # on the classification API to return them or the reply generation API to handle it
-                entities = classification_result.get("entities", {})
-            except Exception as e:
-                logger.warning(f"Error extracting entities: {str(e)}")
+            entities = classification_result.get("entities", {})
             
             # Generate response if needed - only for labels in RESPONSE_LABELS
             reply_text = ""
@@ -498,14 +502,48 @@ class EmailProcessor:
                 "classification": label,
                 "prediction": label,
                 "confidence": confidence,
+                "method": classification_result.get("method", ""),
                 "response": reply_text,
                 "response_sent": False if reply_text else None,
                 "processed_at": datetime.utcnow().isoformat(),
                 "batch_id": self.batch_id,
                 "response_process": False,
                 "save_as_draft": needs_manual_review,
-                "target_folder": label  # Add target folder for easier tracking
+                "target_folder": label,
+                # Store entities directly at top level for easier access by extract_contact_info
+                "entities": entities,
+                # Also store properly in metadata structure for compatibility
+                "metadata": {
+                    "entities": entities,
+                    "sentiment": classification_result.get("sentiment", {}),
+                    "confidence_score": confidence,
+                    "classification_method": classification_result.get("method", ""),
+                    "matching_patterns": classification_result.get("matching_patterns", [])
+                }
             }
+            
+            # Copy OOO and left company data if available
+            if "ooo_person" in entities:
+                email_data["ooo_person"] = entities.get("ooo_person", {})
+                email_data["ooo_contact_person"] = entities.get("ooo_contact_person", {})
+                email_data["ooo_dates"] = entities.get("ooo_dates", {})
+                
+                # Also put in metadata
+                email_data["metadata"]["out_of_office"] = {
+                    "ooo_person": entities.get("ooo_person", {}),
+                    "contact_person": entities.get("ooo_contact_person", {}),
+                    "ooo_dates": entities.get("ooo_dates", {})
+                }
+            
+            if "left_person" in entities:
+                email_data["left_person"] = entities.get("left_person", {})
+                email_data["replacement_contact"] = entities.get("replacement_contact", {})
+                
+                # Also put in metadata
+                email_data["metadata"]["left_company"] = {
+                    "left_person": entities.get("left_person", {}),
+                    "replacement": entities.get("replacement_contact", {})
+                }
             
             # Insert into MongoDB
             self.mongo.insert_email(email_data)

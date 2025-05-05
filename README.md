@@ -1,4 +1,3 @@
-Here's the clean README.md file for your client-side repository:
 
 ```markdown
 # Email Processing System - Client Side
