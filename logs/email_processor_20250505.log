@@ -1,0 +1,80 @@
+2025-05-05 13:09:52,805 [INFO] email_processor: Logging initialized at INFO level
+2025-05-05 13:09:52,805 [INFO] email_processor: === Email Processing System Starting ===
+2025-05-05 13:09:52,805 [INFO] email_processor: Settings:
+2025-05-05 13:09:52,805 [INFO] email_processor: - MAIL_SEND_ENABLED: False
+2025-05-05 13:09:52,805 [INFO] email_processor: - SFTP_ENABLED: True
+2025-05-05 13:09:52,805 [INFO] email_processor: - BATCH_SIZE: 125
+2025-05-05 13:09:52,805 [INFO] email_processor: - BATCH_INTERVAL: 600 seconds
+2025-05-05 13:09:52,805 [INFO] email_processor: Cleaning up existing failed batches
+2025-05-05 13:09:52,829 [INFO] email_processor: No failed batches to clean up
+2025-05-05 13:09:52,829 [INFO] email_processor: Starting retry of failed batches
+2025-05-05 13:09:52,832 [INFO] email_processor: No failed batches to retry
+2025-05-05 13:09:52,832 [INFO] email_processor: Starting main email processing loop
+2025-05-05 13:09:52,832 [INFO] email_processor: Starting email batch processor (batch size: 125, interval: 600s)
+2025-05-05 13:09:52,832 [INFO] email_processor: Mail sending is DISABLED
+2025-05-05 13:09:52,832 [INFO] email_processor: SFTP export is ENABLED
+2025-05-05 13:09:52,832 [INFO] email_processor: Cleaning up existing failed batches
+2025-05-05 13:09:52,837 [INFO] email_processor: No failed batches to clean up
+2025-05-05 13:09:52,837 [INFO] email_processor: Starting batch at 2025-05-05T13:09:52.837326
+2025-05-05 13:09:52,837 [INFO] email_processor: Starting retry of failed batches
+2025-05-05 13:09:52,837 [INFO] email_processor: No failed batches to retry
+2025-05-05 13:09:52,837 [INFO] email_processor: Starting new batch processor run
+2025-05-05 13:09:52,840 [INFO] email_processor: Created new batch run in PostgreSQL with ID: ac681f37-2f28-48ea-9e49-c21150bd22f0
+2025-05-05 13:09:52,840 [INFO] email_processor: Created new batch with ID: ac681f37-2f28-48ea-9e49-c21150bd22f0
+2025-05-05 13:09:52,851 [INFO] email_processor: MongoDB indexes setup complete
+2025-05-05 13:09:52,851 [INFO] email_processor: Connected to MongoDB: db=email_classification, collection=emails
+2025-05-05 13:09:52,863 [INFO] email_processor: Created missing batch record in MongoDB: ac681f37-2f28-48ea-9e49-c21150bd22f0
+2025-05-05 13:09:52,863 [INFO] email_processor: Processing batch ac681f37-2f28-48ea-9e49-c21150bd22f0 (max 125)
+2025-05-05 13:09:52,870 [INFO] email_processor: Using batch size from environment: 125
+2025-05-05 13:09:53,161 [INFO] email_processor: No valid refresh token found; initiating interactive auth flow.
+2025-05-05 13:09:53,283 [INFO] email_processor: Browser opened for authentication. Please login and authorize the app.
+2025-05-05 13:10:28,809 [INFO] email_processor: Batch processor stopped by user
+2025-05-05 13:10:28,832 [INFO] email_processor: No draft emails found for batch ac681f37-2f28-48ea-9e49-c21150bd22f0
+2025-05-05 13:10:28,845 [INFO] email_processor: Updated batch ac681f37-2f28-48ea-9e49-c21150bd22f0 with status: success
+2025-05-05 13:10:28,846 [INFO] email_processor: No emails for batch ac681f37-2f28-48ea-9e49-c21150bd22f0 to export
+2025-05-05 13:10:28,847 [INFO] email_processor: Batch complete. Next batch in 564.0 seconds
+2025-05-05 13:10:32,870 [INFO] email_processor: System shutdown requested (KeyboardInterrupt)
+2025-05-05 13:10:32,870 [INFO] email_processor: === Email Processing System Shutdown ===
+2025-05-05 14:48:05,486 [INFO] email_processor: Logging initialized at INFO level
+2025-05-05 14:48:05,486 [INFO] email_processor: === Email Processing System Starting ===
+2025-05-05 14:48:05,487 [INFO] email_processor: Settings:
+2025-05-05 14:48:05,487 [INFO] email_processor: - MAIL_SEND_ENABLED: False
+2025-05-05 14:48:05,487 [INFO] email_processor: - SFTP_ENABLED: True
+2025-05-05 14:48:05,487 [INFO] email_processor: - BATCH_SIZE: 125
+2025-05-05 14:48:05,487 [INFO] email_processor: - BATCH_INTERVAL: 600 seconds
+2025-05-05 14:48:05,487 [INFO] email_processor: Cleaning up existing failed batches
+2025-05-05 14:48:05,502 [INFO] email_processor: No failed batches to clean up
+2025-05-05 14:48:05,502 [INFO] email_processor: Starting retry of failed batches
+2025-05-05 14:48:05,509 [INFO] email_processor: No failed batches to retry
+2025-05-05 14:48:05,509 [INFO] email_processor: Starting main email processing loop
+2025-05-05 14:48:05,509 [INFO] email_processor: Starting email batch processor (batch size: 125, interval: 600s)
+2025-05-05 14:48:05,509 [INFO] email_processor: Mail sending is DISABLED
+2025-05-05 14:48:05,509 [INFO] email_processor: SFTP export is ENABLED
+2025-05-05 14:48:05,509 [INFO] email_processor: Cleaning up existing failed batches
+2025-05-05 14:48:05,513 [INFO] email_processor: No failed batches to clean up
+2025-05-05 14:48:05,513 [INFO] email_processor: Starting batch at 2025-05-05T14:48:05.513944
+2025-05-05 14:48:05,514 [INFO] email_processor: Starting retry of failed batches
+2025-05-05 14:48:05,518 [INFO] email_processor: No failed batches to retry
+2025-05-05 14:48:05,518 [INFO] email_processor: Starting new batch processor run
+2025-05-05 14:48:05,522 [INFO] email_processor: Created new batch run in PostgreSQL with ID: 3f5c0d68-2b1c-492a-8dfa-531b1faabd39
+2025-05-05 14:48:05,522 [INFO] email_processor: Created new batch with ID: 3f5c0d68-2b1c-492a-8dfa-531b1faabd39
+2025-05-05 14:48:05,532 [INFO] email_processor: MongoDB indexes setup complete
+2025-05-05 14:48:05,532 [INFO] email_processor: Connected to MongoDB: db=email_classification, collection=emails
+2025-05-05 14:48:05,533 [INFO] email_processor: Created missing batch record in MongoDB: 3f5c0d68-2b1c-492a-8dfa-531b1faabd39
+2025-05-05 14:48:05,533 [INFO] email_processor: Processing batch 3f5c0d68-2b1c-492a-8dfa-531b1faabd39 (max 125)
+2025-05-05 14:48:05,536 [INFO] email_processor: Using batch size from environment: 125
+2025-05-05 14:48:05,820 [INFO] email_processor: Attempting token acquisition by refresh token.
+2025-05-05 14:48:06,764 [INFO] email_processor: Successfully acquired access token via refresh token.
+2025-05-05 14:48:06,765 [INFO] email_processor: Updated refresh token.
+2025-05-05 14:48:07,184 [INFO] email_processor: Found parent folder 'Email Classification' (ID: AQMkADAwATM0MDAAMi04YWNiLTZlZjctMDACLTAwCgAuAAADc-7mk_qVAUmJ2Z-yyV7fYgEAcZ70xL_pF0GgVLEMlLppiQAAABZEH9QAAAA=)
+2025-05-05 14:48:07,458 [INFO] email_processor: Folder mapping ready (7 folders)
+2025-05-05 14:48:07,736 [INFO] email_processor: Total unread emails in inbox: 0
+2025-05-05 14:48:07,995 [INFO] email_processor: No unread emails to process.
+2025-05-05 14:48:07,996 [INFO] email_processor: No emails to process.
+2025-05-05 14:48:08,010 [INFO] email_processor: No draft emails found for batch 3f5c0d68-2b1c-492a-8dfa-531b1faabd39
+2025-05-05 14:48:08,026 [INFO] email_processor: Updated batch 3f5c0d68-2b1c-492a-8dfa-531b1faabd39 with status: success
+2025-05-05 14:48:08,027 [INFO] email_processor: No emails for batch 3f5c0d68-2b1c-492a-8dfa-531b1faabd39 to export
+2025-05-05 14:48:08,027 [INFO] email_processor: Batch 3f5c0d68-2b1c-492a-8dfa-531b1faabd39 completed in 2.5s: 0 processed, 0 failed, 0 drafts
+2025-05-05 14:48:08,027 [INFO] email_processor: Batch complete. Next batch in 597.5 seconds
+2025-05-05 14:48:23,820 [INFO] email_processor: System shutdown requested (KeyboardInterrupt)
+2025-05-05 14:48:23,821 [INFO] email_processor: === Email Processing System Shutdown ===
