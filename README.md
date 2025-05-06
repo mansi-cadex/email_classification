@@ -21,12 +21,15 @@ This email processing system is designed to automatically fetch, classify, and r
 
 ### Key Files
 
-- `src/fetch_reply.py`: Email fetching and processing
-- `src/email_sender.py`: Email sending and draft creation
-- `src/db.py`: Database connections (MongoDB and PostgreSQL)
-- `src/log_config.py`: Logging configuration
-- `loop.py`: Batch processing and orchestration
-- `main.py`: Application entry point
+email_classification/
+├── src/
+│   ├── fetch_reply.py        # Email fetching and processing
+│   ├── email_sender.py       # Email sending and draft creation
+│   ├── db.py                 # Database connections (MongoDB and PostgreSQL)
+│   ├── log_config.py         # Logging configuration
+├── loop.py                   # Batch processing and orchestration
+├── main.py                   # Application entry point
+
 
 ## Prerequisites
 
