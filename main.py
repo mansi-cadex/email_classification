@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 main.py - Application entry point for the Email Classification System
 
@@ -12,267 +13,154 @@ It handles:
 import os
 import sys
 import time
-import argparse
-import logging
 import signal
-from typing import Dict, Any
+import logging
+from datetime import datetime
 from dotenv import load_dotenv
-
-# Import from refactored modules
 from src.log_config import logger
 from loop import run_email_processor, clean_failed_batches, retry_failed_batches, process_batch
+
+
+# Emergency exit handler - will force exit immediately
+def emergency_exit(signum, frame):
+    print("\nEmergency exit triggered. Terminating immediately...")
+    os._exit(1)  # Force exit without cleanup
+
+
+# Register emergency exit for Ctrl+\
+signal.signal(signal.SIGQUIT, emergency_exit)
+
 
 # Load environment variables
 load_dotenv()
 
-# Global flag for graceful shutdown
-SHUTDOWN_REQUESTED = False
 
 def setup_logging():
-    """Configure logging for the application."""
+    """Configure logging for the application"""
     log_level = os.getenv("LOG_LEVEL", "INFO")
     log_format = '%(asctime)s [%(levelname)s] %(name)s: %(message)s'
     
-    # Determine log file location
     log_dir = os.getenv("LOG_DIR", "logs")
     if not os.path.exists(log_dir):
         try:
             os.makedirs(log_dir, exist_ok=True)
-        except Exception as e:
-            print(f"Could not create log directory {log_dir}: {str(e)}")
+        except:
             log_dir = "."
     
     log_file = os.path.join(log_dir, 'email_processor.log')
     
-    try:
-        logging.basicConfig(
-            level=getattr(logging, log_level),
-            format=log_format,
-            handlers=[
-                logging.StreamHandler(),
-                logging.FileHandler(log_file)
-            ]
-        )
-        
-        # Set third-party loggers to a higher level to reduce noise
-        logging.getLogger("paramiko").setLevel(logging.WARNING)
-        logging.getLogger("httpx").setLevel(logging.WARNING)
-        logging.getLogger("urllib3").setLevel(logging.WARNING)
-        
-        logger.info(f"Logging initialized at {log_level} level to {log_file}")
-    except Exception as e:
-        print(f"Error setting up logging: {str(e)}")
-        sys.exit(1)
-
-
-def parse_arguments():
-    """Parse command-line arguments."""
-    parser = argparse.ArgumentParser(description="Email Classification System")
-    
-    # Mode selection
-    parser.add_argument(
-        "--mode", "-m",
-        choices=["daemon", "single", "retry", "cleanup"],
-        default="daemon",
-        help="Operation mode - daemon (continuous), single (one batch), retry (failed batches), cleanup (mark failed batches)"
+    logging.basicConfig(
+        level=getattr(logging, log_level),
+        format=log_format,
+        handlers=[
+            logging.StreamHandler(),
+            logging.FileHandler(log_file)
+        ]
     )
-    
-    # Batch ID for single batch processing
-    parser.add_argument(
-        "--batch-id", "-b",
-        help="Process a specific batch ID (only used with single mode)"
-    )
-    
-    # Override environment variables
-    parser.add_argument(
-        "--batch-size", "-s",
-        type=int,
-        help="Override batch size from environment variable"
-    )
-    
-    parser.add_argument(
-        "--interval", "-i",
-        type=int,
-        help="Override batch interval in seconds from environment variable"
-    )
-    
-    parser.add_argument(
-        "--send-mail",
-        action="store_true",
-        help="Enable mail sending regardless of environment setting"
-    )
-    
-    parser.add_argument(
-        "--force-drafts",
-        action="store_true",
-        help="Force all emails to be saved as drafts regardless of environment setting"
-    )
-    
-    # Parse the arguments
-    args = parser.parse_args()
-    
-    # Update environment variables if arguments are provided
-    if args.batch_size:
-        os.environ["BATCH_SIZE"] = str(args.batch_size)
-    
-    if args.interval:
-        os.environ["BATCH_INTERVAL"] = str(args.interval)
-    
-    if args.send_mail:
-        os.environ["MAIL_SEND_ENABLED"] = "True"
-    
-    if args.force_drafts:
-        os.environ["FORCE_DRAFTS"] = "True"
-    
-    return args
-
-
-def handle_signal(sig, frame):
-    """Handle termination signals for graceful shutdown."""
-    global SHUTDOWN_REQUESTED
-    
-    signal_names = {
-        signal.SIGINT: "SIGINT",
-        signal.SIGTERM: "SIGTERM"
-    }
-    
-    signal_name = signal_names.get(sig, f"Signal {sig}")
-    logger.info(f"Received {signal_name}, initiating graceful shutdown...")
-    
-    SHUTDOWN_REQUESTED = True
-
-
-def register_signal_handlers():
-    """Register signal handlers for graceful shutdown."""
-    try:
-        signal.signal(signal.SIGINT, handle_signal)
-        signal.signal(signal.SIGTERM, handle_signal)
-        logger.info("Signal handlers registered for graceful shutdown")
-    except (AttributeError, ValueError) as e:
-        # This can happen on some systems where signals are not supported
-        logger.warning(f"Could not register signal handlers: {str(e)}")
-
-
-def get_environment_settings() -> Dict[str, Any]:
-    """Get important environment settings for logging."""
-    return {
-        "MAIL_SEND_ENABLED": os.getenv("MAIL_SEND_ENABLED", "False").lower() in ["true", "yes", "1"],
-        "FORCE_DRAFTS": os.getenv("FORCE_DRAFTS", "False").lower() in ["true", "yes", "1"],
-        "SFTP_ENABLED": os.getenv("SFTP_ENABLED", "False").lower() in ["true", "yes", "1"],
-        "BATCH_SIZE": int(os.getenv("BATCH_SIZE", "125")),
-        "BATCH_INTERVAL": int(os.getenv("BATCH_INTERVAL", "600")),
-        "MODEL_API_URL": os.getenv("MODEL_API_URL", "http://localhost:8000")
-    }
-
-
-def run_daemon_mode():
-    """Run the system in continuous daemon mode."""
-    logger.info("Starting daemon mode - continuous processing")
-    
-    # Register signal handlers for graceful shutdown
-    register_signal_handlers()
-    
-    # First clean up and retry existing batches
-    clean_failed_batches()
-    retry_failed_batches()
-    
-    # Start the main processing loop
-    logger.info("Starting main email processing loop")
-    
-    try:
-        run_email_processor()
-    except Exception as e:
-        logger.error(f"Error in daemon mode: {str(e)}", exc_info=True)
-        return False
-    
-    return True
-
-
-def run_single_batch(batch_id=None):
-    """Run a single batch processing cycle."""
-    logger.info(f"Processing single batch{' with ID ' + batch_id if batch_id else ''}")
-    
-    try:
-        success, processed, failed, drafts = process_batch(batch_id)
-        
-        logger.info(f"Batch processing completed: success={success}, processed={processed}, "
-                   f"failed={failed}, drafts={drafts}")
-        
-        return success
-    except Exception as e:
-        logger.error(f"Error processing single batch: {str(e)}", exc_info=True)
-        return False
-
-
-def run_retry_mode():
-    """Retry failed batches that aren't permanently failed."""
-    logger.info("Running in retry mode - processing failed batches")
-    
-    try:
-        success = retry_failed_batches()
-        logger.info(f"Retry processing completed: success={success}")
-        return success
-    except Exception as e:
-        logger.error(f"Error in retry mode: {str(e)}", exc_info=True)
-        return False
-
-
-def run_cleanup_mode():
-    """Clean up failed batches by marking them permanently failed."""
-    logger.info("Running in cleanup mode - marking failed batches as permanently failed")
-    
-    try:
-        success = clean_failed_batches()
-        logger.info(f"Cleanup completed: success={success}")
-        return success
-    except Exception as e:
-        logger.error(f"Error in cleanup mode: {str(e)}", exc_info=True)
-        return False
+    logger.info(f"Logging initialized at {log_level} level")
 
 
 def main():
-    """Main entry point for the email processing application."""
+    """Main entry point for the email processing application"""
+    # Set flag to track if shutdown is requested
+    shutdown_requested = False
+    
+    # Define signal handler for graceful shutdown
+    def signal_handler(sig, frame):
+        nonlocal shutdown_requested
+        signal_name = "SIGINT" if sig == signal.SIGINT else "SIGTERM"
+        logger.info(f"Received {signal_name}, initiating graceful shutdown...")
+        shutdown_requested = True
+        
+        # Set a timeout to force exit if graceful shutdown takes too long
+        def force_exit():
+            logger.warning("Graceful shutdown is taking too long. Forcing exit...")
+            os._exit(1)
+            
+        # Schedule force exit after 5 seconds
+        signal.alarm(5)
+    
+    # Register handlers for SIGINT (Ctrl+C) and SIGTERM
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
+    # Register SIGALRM to force exit
+    signal.signal(signal.SIGALRM, lambda sig, frame: os._exit(1))
+    
     # Initialize logging
     setup_logging()
     
-    # Parse command-line arguments
-    args = parse_arguments()
-    
-    # Get important environment settings
-    settings = get_environment_settings()
-    
-    # Print startup banner
-    logger.info("=== Email Classification System Starting ===")
+    logger.info("=== Email Processing System Starting ===")
     logger.info("Settings:")
-    for key, value in settings.items():
-        logger.info(f"- {key}: {value}")
-    
-    success = False
+    logger.info(f"- MAIL_SEND_ENABLED: {os.getenv('MAIL_SEND_ENABLED', 'False')}")
+    logger.info(f"- FORCE_DRAFTS: {os.getenv('FORCE_DRAFTS', 'True')}")
+    logger.info(f"- SFTP_ENABLED: {os.getenv('SFTP_ENABLED', 'False')}")
+    logger.info(f"- BATCH_SIZE: {os.getenv('BATCH_SIZE', '125')}")
+    logger.info(f"- BATCH_INTERVAL: {os.getenv('BATCH_INTERVAL', '600')} seconds")
     
     try:
-        # Execute appropriate mode
-        if args.mode == "daemon":
-            success = run_daemon_mode()
-        elif args.mode == "single":
-            success = run_single_batch(args.batch_id)
-        elif args.mode == "retry":
-            success = run_retry_mode()
-        elif args.mode == "cleanup":
-            success = run_cleanup_mode()
-        else:
-            logger.error(f"Unknown mode: {args.mode}")
-            success = False
+        # Clean up existing failed batches
+        if not shutdown_requested:
+            clean_failed_batches()
+        
+        # Retry any failed batches
+        if not shutdown_requested:
+            retry_failed_batches()
+        
+        # Start the main processing loop
+        if not shutdown_requested:
+            logger.info("Starting main email processing loop")
             
+            # Instead of using run_email_processor() which might not properly check for shutdown,
+            # implement the main loop here with proper shutdown checking
+            batch_interval = int(os.getenv("BATCH_INTERVAL", "600"))
+            
+            while not shutdown_requested:
+                # Process a batch
+                start_time = datetime.now()
+                logger.info(f"Starting batch at {start_time.isoformat()}")
+                
+                # Run a single batch
+                try:
+                    # Run a single batch if not shutting down
+                    if not shutdown_requested:
+                        process_batch()
+                        
+                    # Calculate time until next batch
+                    elapsed = (datetime.now() - start_time).total_seconds()
+                    wait_time = max(0, batch_interval - elapsed)
+                    
+                    # Log time until next batch
+                    if not shutdown_requested:
+                        logger.info(f"Batch complete. Next batch in {wait_time:.1f} seconds")
+                    
+                    # Wait until next batch, checking for shutdown frequently
+                    for _ in range(int(wait_time)):
+                        if shutdown_requested:
+                            break
+                        time.sleep(1)
+                        
+                except Exception as e:
+                    logger.error(f"Error processing batch: {str(e)}", exc_info=True)
+                    # Wait a bit but still check for shutdown
+                    for _ in range(min(60, batch_interval)):
+                        if shutdown_requested:
+                            break
+                        time.sleep(1)
+                
+                # Exit the loop if shutdown was requested
+                if shutdown_requested:
+                    break
+    
     except KeyboardInterrupt:
-        logger.info("System shutdown requested (KeyboardInterrupt)")
+        logger.info("Shutdown requested (KeyboardInterrupt)")
     except Exception as e:
         logger.error(f"Unexpected error in main process: {str(e)}", exc_info=True)
     finally:
-        logger.info("=== Email Classification System Shutdown ===")
-    
-    # Return appropriate exit code
-    return 0 if success else 1
+        logger.info("=== Email Processing System Shutdown ===")
+        # Force exit after logging shutdown message
+        os._exit(0)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()
