@@ -1,3 +1,15 @@
+"""
+email_sender.py - Module for handling all email reply creation and sending operations.
+
+This module provides a centralized interface for:
+1. Creating draft emails
+2. Sending emails directly
+3. Processing batches of draft emails
+4. Sending pending replies
+
+It handles Microsoft Graph API integration and database updates.
+"""
+
 import os
 import sys
 import base64
@@ -6,13 +18,27 @@ import msal
 import time
 from datetime import datetime
 from dotenv import load_dotenv
-# Add parent directory to path
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-# Import both MongoDB and PostgreSQL helpers
-from db import get_mongo, PostgresHelper
-from log_config import logger
+from src.db import get_mongo, PostgresHelper
+from src.log_config import logger
+
 # Load environment variables
 load_dotenv()
+
+# Global configuration flags - read directly from environment
+MAIL_SEND_ENABLED = os.getenv("MAIL_SEND_ENABLED", "False").lower() in ["true", "yes", "1"]
+FORCE_DRAFTS = os.getenv("FORCE_DRAFTS", "True").lower() in ["true", "yes", "1"]
+
+# Log email sending configuration
+if MAIL_SEND_ENABLED:
+    logger.warning("🚨 MAIL_SEND_ENABLED is TRUE - Emails will be SENT rather than saved as drafts")
+    logger.warning("Set MAIL_SEND_ENABLED=False in .env to prevent sending emails")
+else:
+    logger.info("📝 Email sending is disabled - all emails will be saved as drafts")
+
+if FORCE_DRAFTS:
+    logger.info("📝 FORCE_DRAFTS is enabled - all emails will be saved as drafts regardless of other settings")
+
+
 class Config:
     """Configuration class for email processing system."""
     
@@ -21,16 +47,13 @@ class Config:
         self.ms_graph_base_url = "https://graph.microsoft.com/v1.0"
         self.client_id = os.getenv("CLIENT_ID")
         self.client_secret = os.getenv("CLIENT_SECRET")
-        self.authority = os.getenv("AUTHORITY", "https://login.microsoftonline.com/common")
-        self.scopes = ["User.Read", "Mail.ReadWrite", "Mail.Send"]
+        self.tenant_id = os.getenv("TENANT_ID")
+        self.email_address = os.getenv("EMAIL_ADDRESS")
+        self.scopes = ["https://graph.microsoft.com/.default"]
 
-        # API configuration for the model server
-        self.model_api_url = os.getenv("MODEL_API_URL", "http://localhost:8000")
-        
         # Domain configuration
-        self.your_domain = os.getenv("YOUR_DOMAIN", "yourdomain.com")
-        self.sender_email = os.getenv("SENDER_EMAIL")
-        self.company_name = os.getenv("COMPANY_NAME", "Your Company")
+        self.your_domain = "ABC-AMEGA.COM"
+        self.company_name = "ABC/AMEGA"
         
         # Email label configurations
         self.allowed_labels = [
@@ -67,16 +90,17 @@ class Config:
             "This email was generated automatically by {company_name} System.\n"
             "Sent on: {sent_datetime}"
         )
+
+
 class MSGraphAuth:
-    """Microsoft Graph API authentication handler."""
+    """Microsoft Graph API authentication handler using application permissions."""
     
-    def __init__(self, config):
-        self.config = config
-        self.refresh_token_path = "refresh_token.txt"
+    def __init__(self, config=None):
+        self.config = config or Config()
         self._token_cache = {}  # Cache tokens in memory
     
     def get_access_token(self, force_refresh=False):
-        """Fetch a valid access token using a refresh token."""
+        """Get an access token using client credentials flow."""
         try:
             # Check if we have a cached valid token
             current_time = time.time()
@@ -84,89 +108,40 @@ class MSGraphAuth:
                 logger.debug("Using cached access token")
                 return self._token_cache["token"]
             
-            client = msal.ConfidentialClientApplication(
+            # Log client and tenant ID for debugging
+            logger.debug(f"Using client_id: {self.config.client_id[:8]}*** and tenant_id: {self.config.tenant_id}")
+            
+            app = msal.ConfidentialClientApplication(
                 client_id=self.config.client_id,
                 client_credential=self.config.client_secret,
-                authority=self.config.authority,
+                authority=f"https://login.microsoftonline.com/{self.config.tenant_id}"
             )
             
-            # Check if refresh token file exists
-            if not os.path.exists(self.refresh_token_path):
-                logger.error("Refresh token not found. Run fetch_reply.py first to initialize it.")
-                raise Exception("Refresh token not found. Run fetch_reply.py first to initialize it.")
+            # Acquire token for application permissions
+            result = app.acquire_token_for_client(scopes=["https://graph.microsoft.com/.default"])
             
-            # Read refresh token
-            try:
-                with open(self.refresh_token_path, "r") as file:
-                    refresh_token = file.read().strip()
-                    
-                if not refresh_token:
-                    logger.error("Refresh token file exists but is empty")
-                    raise Exception("Empty refresh token found. Run fetch_reply.py to reinitialize.")
-            except IOError as e:
-                logger.error(f"Error reading refresh token file: {str(e)}")
-                raise Exception(f"Could not read refresh token: {str(e)}")
-            
-            # Acquire token with error handling
-            token_response = client.acquire_token_by_refresh_token(refresh_token, scopes=self.config.scopes)
-            
-            # Check for errors in response
-            if "error" in token_response:
-                error_code = token_response.get("error")
-                error_message = token_response.get("error_description", "Unknown error")
-                logger.error(f"Token acquisition failed: {error_code} - {error_message}")
-                
-                # Handle specific error cases
-                if "invalid_grant" in error_message.lower() or error_code == "invalid_grant":
-                    logger.warning("Invalid grant error - refresh token may have expired or been revoked")
-                    # Optional: delete invalid refresh token file
-                    # os.remove(self.refresh_token_path)
-                    raise Exception("Refresh token has expired. Please run fetch_reply.py to re-authenticate.")
-                
-                raise Exception(f"Failed to acquire token: {error_code} - {error_message}")
-            
-            # Check for access token
-            if "access_token" in token_response:
+            if "access_token" in result:
                 # Cache the token with expiration
-                if "expires_in" in token_response:
-                    self._token_cache = {
-                        "token": token_response["access_token"],
-                        "expires_at": current_time + token_response["expires_in"]
-                    }
-                    logger.debug(f"Token cached, expires in {token_response['expires_in']} seconds")
-                else:
-                    # Default expiration: 1 hour
-                    self._token_cache = {
-                        "token": token_response["access_token"],
-                        "expires_at": current_time + 3600
-                    }
-                    logger.debug("Token cached with default 1-hour expiration")
-                
-                # Save refresh token if provided
-                if "refresh_token" in token_response:
-                    try:
-                        with open(self.refresh_token_path, "w") as file:
-                            file.write(token_response["refresh_token"])
-                        logger.debug("Saved new refresh token")
-                    except IOError as e:
-                        logger.warning(f"Could not save new refresh token: {str(e)}")
-                        # Continue even if we can't save the new token
-                
-                return token_response["access_token"]
+                self._token_cache = {
+                    "token": result["access_token"],
+                    "expires_at": current_time + result.get("expires_in", 3600)
+                }
+                logger.debug(f"Successfully acquired access token using application permissions")
+                return result["access_token"]
             else:
-                # This should be unreachable if we properly check for errors above
-                # But kept as a fallback
-                logger.error(f"No access token in response: {token_response}")
-                raise Exception("No access token returned. Authentication failed.")
+                logger.error(f"Error acquiring token: {result.get('error')}: {result.get('error_description')}")
+                raise Exception(f"Failed to acquire token: {result.get('error_description')}")
+                
         except Exception as e:
             logger.exception(f"Error getting access token: {str(e)}")
             raise
 
+
 class EmailValidator:
     """Validates email responses and determines processing logic."""
     
-    def __init__(self, config):
-        self.config = config
+    def __init__(self, config=None):
+        self.config = config or Config()
     
     def is_valid_reply(self, reply):
         """Check if the generated reply is valid."""
@@ -179,13 +154,30 @@ class EmailValidator:
     
     def should_skip_email(self, email):
         """Determine if an email should be skipped."""
-        # Skip if email has a no-response label
-        label = email.get("prediction", "")
-        if label in self.config.no_response_labels:
+        # Check if the email has already been processed
+        if email.get("draft_saved") is True:
+            logger.info(f"Skipping already saved draft: {email.get('message_id')}")
             return True
             
-        # Skip if label is not in our response labels
-        if label not in self.config.response_labels:
+        if email.get("response_sent") is True:
+            logger.info(f"Skipping already sent email: {email.get('message_id')}")
+            return True
+        
+        # Process if it has a response and should be saved as draft
+        if email.get("save_as_draft", False) is True and email.get("response"):
+            return False
+            
+        # Process if it has a response and a response label
+        label = email.get("prediction", "")
+        if label in self.config.response_labels and email.get("response"):
+            return False
+        
+        # Skip if email has a no-response label and no response
+        if label in self.config.no_response_labels and not email.get("response"):
+            return True
+            
+        # Skip if label is not in our response labels and not marked for draft
+        if label not in self.config.response_labels and not email.get("save_as_draft"):
             return True
             
         # Skip if response is marked as None (explicitly set not to respond)
@@ -193,12 +185,14 @@ class EmailValidator:
             return True
             
         return False
+
+
 class EmailSender:
     """Handles sending emails and saving drafts."""
     
-    def __init__(self, config, auth_manager):
-        self.config = config
-        self.auth_manager = auth_manager
+    def __init__(self, config=None, auth_manager=None):
+        self.config = config or Config()
+        self.auth_manager = auth_manager or MSGraphAuth(self.config)
     
     def _add_footer(self, body):
         """Add a standardized footer to the email body."""
@@ -246,10 +240,21 @@ class EmailSender:
         logger.error(f"HTTP error during {operation}: {status_code} - {response.text}")
         return False
     
-    def save_as_draft(self, to_address, subject, body, retry_attempt=0):
+    def save_as_draft(self, to_address, subject, body, message_id=None, batch_id=None, retry_attempt=0):
         """Save an email as draft instead of sending it."""
         try:
+            logger.info(f"Attempting to save draft to {to_address} with subject: '{subject[:30]}...'")
+            
+            # Check if email address is configured
+            if not self.config.email_address:
+                logger.error("EMAIL_ADDRESS environment variable is not set or is empty")
+                return None
+                
+            logger.info(f"Using email address: {self.config.email_address}")
+            
+            # Get access token
             access_token = self.auth_manager.get_access_token()
+            logger.debug("Successfully got access token for draft creation")
         except Exception as e:
             logger.error(f"Failed to get access token: {str(e)}")
             return None
@@ -286,27 +291,48 @@ class EmailSender:
             ]
         }
         
-        # Create draft endpoint
-        endpoint = f"{self.config.ms_graph_base_url}/me/messages"
+        # Create draft endpoint - updated to use users/{email} instead of me
+        endpoint = f"{self.config.ms_graph_base_url}/users/{self.config.email_address}/messages"
+        logger.info(f"Creating draft using endpoint: {endpoint}")
         
         try:
+            # Log request details for debugging
+            logger.debug(f"Draft request headers: {headers}")
+            logger.debug(f"Draft request payload: {message_payload}")
+            
             response = httpx.post(endpoint, headers=headers, json=message_payload, timeout=30.0)
+            
+            # Log detailed response for debugging
+            logger.info(f"Draft creation response status: {response.status_code}")
             
             if response.status_code in [200, 201]:
                 # If successful, the response will contain the created draft
                 draft_data = response.json()
                 draft_id = draft_data.get("id")
                 logger.info(f"Email saved as draft for {to_address} with draft ID: {draft_id}")
+                
+                # Log response details for successful drafts
+                logger.debug(f"Draft creation successful response: {draft_data}")
+                
+                # Update MongoDB if message_id is provided
+                if message_id:
+                    mongo = get_mongo()
+                    mongo.mark_email_draft_saved(message_id, draft_id)
+                
                 return draft_id
+            
+            # Log detailed error information
+            logger.error(f"Failed to save draft. Status code: {response.status_code}")
+            logger.error(f"Response body: {response.text}")
             
             # Handle errors with retry logic
             if self._handle_http_error(response, "draft creation", retry_attempt):
                 # Only increment retry_attempt if token refresh was triggered
                 next_retry = retry_attempt + 1 if response.status_code == 401 else retry_attempt
                 if next_retry < self.config.max_retries:
-                    return self.save_as_draft(to_address, subject, body, next_retry)
+                    logger.info(f"Retrying draft creation after error (attempt {next_retry+1})")
+                    return self.save_as_draft(to_address, subject, body, message_id, batch_id, next_retry)
             
-            logger.error(f"Failed to save draft. Status code: {response.status_code}, Response: {response.text}")
             return None
                 
         except httpx.HTTPError as e:
@@ -314,16 +340,32 @@ class EmailSender:
             if retry_attempt < self.config.max_retries:
                 logger.info(f"Retrying draft creation ({retry_attempt + 1}/{self.config.max_retries})...")
                 time.sleep(self.config.retry_delay)
-                return self.save_as_draft(to_address, subject, body, retry_attempt + 1)
+                return self.save_as_draft(to_address, subject, body, message_id, batch_id, retry_attempt + 1)
             return None
         except Exception as e:
             logger.exception(f"Error saving draft: {str(e)}")
             return None
     
-    def send_email(self, to_address, subject, body, retry_attempt=0):
+    def send_email(self, to_address, subject, body, message_id=None, batch_id=None, retry_attempt=0):
         """Send an email directly."""
+        # Safety check - never send if mail sending is disabled or force drafts is enabled
+        if not MAIL_SEND_ENABLED or FORCE_DRAFTS:
+            logger.warning(f"⚠️ ATTEMPTED TO SEND EMAIL TO {to_address}, BUT MAIL_SEND_ENABLED={MAIL_SEND_ENABLED} OR FORCE_DRAFTS={FORCE_DRAFTS}")
+            logger.info("Saving as draft instead of sending due to environment configuration")
+            return self.save_as_draft(to_address, subject, body, message_id, batch_id, retry_attempt)
+        
         try:
+            logger.info(f"Attempting to send email to {to_address} with subject: '{subject[:30]}...'")
+            
+            # Check if email address is configured
+            if not self.config.email_address:
+                logger.error("EMAIL_ADDRESS environment variable is not set or is empty")
+                return False
+                
+            logger.info(f"Using email address: {self.config.email_address}")
+            
             access_token = self.auth_manager.get_access_token()
+            logger.debug("Successfully got access token for email sending")
         except Exception as e:
             logger.error(f"Failed to get access token: {str(e)}")
             return False
@@ -365,24 +407,39 @@ class EmailSender:
             "saveToSentItems": "true"
         }
         
-        endpoint = f"{self.config.ms_graph_base_url}/me/sendMail"
+        # Updated to use users/{email} instead of me
+        endpoint = f"{self.config.ms_graph_base_url}/users/{self.config.email_address}/sendMail"
+        logger.info(f"Sending email using endpoint: {endpoint}")
         
         try:
             response = httpx.post(endpoint, headers=headers, json=payload, timeout=30.0)
             
+            # Log response details
+            logger.info(f"Email sending response status: {response.status_code}")
+            
             # Check if successful
             if response.status_code in [200, 202]:
                 logger.info(f"Email sent successfully to {to_address}")
+                
+                # Update MongoDB if message_id is provided
+                if message_id:
+                    mongo = get_mongo()
+                    mongo.mark_email_sent(message_id)
+                
                 return True
+            
+            # Log detailed error information
+            logger.error(f"Failed to send email. Status code: {response.status_code}")
+            logger.error(f"Response body: {response.text}")
             
             # Handle errors with retry logic
             if self._handle_http_error(response, "email sending", retry_attempt):
                 # Only increment retry_attempt if token refresh was triggered
                 next_retry = retry_attempt + 1 if response.status_code == 401 else retry_attempt
                 if next_retry < self.config.max_retries:
-                    return self.send_email(to_address, subject, body, next_retry)
+                    logger.info(f"Retrying email sending after error (attempt {next_retry+1})")
+                    return self.send_email(to_address, subject, body, message_id, batch_id, next_retry)
             
-            logger.error(f"Failed to send email. Status code: {response.status_code}, Response: {response.text}")
             return False
                 
         except httpx.HTTPError as e:
@@ -390,18 +447,20 @@ class EmailSender:
             if retry_attempt < self.config.max_retries:
                 logger.info(f"Retrying email send ({retry_attempt + 1}/{self.config.max_retries})...")
                 time.sleep(self.config.retry_delay)
-                return self.send_email(to_address, subject, body, retry_attempt + 1)
+                return self.send_email(to_address, subject, body, message_id, batch_id, retry_attempt + 1)
             return False
         except Exception as e:
             logger.exception(f"Error sending email: {str(e)}")
             return False
+
+
 class EmailProcessor:
-    """Main email processing logic."""
+    """Main email processing logic for batches of emails."""
     
-    def __init__(self, config, email_validator, email_sender):
-        self.config = config
-        self.email_validator = email_validator
-        self.email_sender = email_sender
+    def __init__(self, config=None, email_validator=None, email_sender=None):
+        self.config = config or Config()
+        self.email_validator = email_validator or EmailValidator(self.config)
+        self.email_sender = email_sender or EmailSender(self.config)
         self.already_warned_no_pending = False
         self.mongo = get_mongo()  # Get MongoDB connector
         self.current_batch_stats = {
@@ -438,22 +497,45 @@ class EmailProcessor:
     
     def process_email(self, email):
         """Process an email - either send it or save as draft based on flag."""
+        message_id = email.get("message_id", "unknown")
+        logger.info(f"Processing email with message_id: {message_id}")
+        
         try:
+            # Check for duplicate processing - skip if already processed
+            if email.get("draft_saved") is True:
+                logger.info(f"Email {message_id} already saved as draft - skipping")
+                self.current_batch_stats["emails_skipped"] += 1
+                return True, True
+                
+            if email.get("response_sent") is True:
+                logger.info(f"Email {message_id} already sent - skipping")
+                self.current_batch_stats["emails_skipped"] += 1
+                return True, False
+            
             # Skip emails that shouldn't receive responses
             if self.email_validator.should_skip_email(email):
+                logger.info(f"Skipping email {message_id} - should not receive a response")
                 # Still mark as sent for these since we're deliberately skipping
                 self.mongo.mark_email_sent(email.get("message_id"))
                 self.current_batch_stats["emails_skipped"] += 1
                 return True, False  # Success, not a draft
             
-            # Check if email should be saved as draft
-            save_draft = email.get("save_as_draft", False)
+            # Determine if email should be saved as draft
+            # Use environment variables to override if needed
+            original_save_as_draft = email.get("save_as_draft", False)
+            save_draft = True if (FORCE_DRAFTS or not MAIL_SEND_ENABLED) else original_save_as_draft
+            
+            if save_draft != original_save_as_draft:
+                logger.info(f"Email {message_id} save_as_draft flag was {original_save_as_draft}, overridden to {save_draft} by environment settings")
+            else:
+                logger.info(f"Email {message_id} save_as_draft flag: {save_draft}")
             
             # Get and validate response text
             response_text = str(email.get("response", "")).strip()
             
             # Skip invalid replies
             if not self.email_validator.is_valid_reply(response_text):
+                logger.info(f"Email {message_id} has invalid reply text")
                 if save_draft:
                     self.mongo.mark_email_draft_saved(email.get("message_id"))
                     self.current_batch_stats["drafts_created"] += 1
@@ -461,11 +543,13 @@ class EmailProcessor:
                     self.mongo.mark_email_sent(email.get("message_id"))
                     self.current_batch_stats["emails_skipped"] += 1
                 return True, save_draft
+                
             # Get recipient address
             to_address = str(email.get("sender", "")).strip()
             
             # Skip if no valid recipient
             if not to_address:
+                logger.warning(f"Email {message_id} has no valid recipient address")
                 if save_draft:
                     self.mongo.mark_email_draft_saved(email.get("message_id"))
                     self.current_batch_stats["drafts_created"] += 1
@@ -480,15 +564,16 @@ class EmailProcessor:
             
             if save_draft:
                 # Save as draft instead of sending
+                logger.info(f"Saving email {message_id} as draft to {to_address}")
                 draft_id = self.email_sender.save_as_draft(
                     to_address=to_address,
                     subject=subject,
-                    body=body
+                    body=body,
+                    message_id=email.get("message_id"),
+                    batch_id=email.get("batch_id")
                 )
                 
                 if draft_id:
-                    # Mark as saved to draft
-                    self.mongo.mark_email_draft_saved(email.get("message_id"), draft_id)
                     logger.info(f"Email saved as draft for review: {email.get('message_id')}")
                     self.current_batch_stats["drafts_created"] += 1
                     return True, True  # Success, is a draft
@@ -498,29 +583,32 @@ class EmailProcessor:
                     return False, True  # Failed, is a draft
             else:
                 # Send the email directly
+                logger.info(f"Sending email {message_id} to {to_address}")
                 send_success = self.email_sender.send_email(
                     to_address=to_address,
                     subject=subject,
-                    body=body
+                    body=body,
+                    message_id=email.get("message_id"),
+                    batch_id=email.get("batch_id")
                 )
                 
                 if send_success:
-                    # Mark as responded
-                    self.mongo.mark_email_sent(email.get("message_id"))
+                    logger.info(f"Email {message_id} sent successfully")
                     self.current_batch_stats["emails_sent"] += 1
                     return True, False  # Success, not a draft
                 
+                logger.warning(f"Failed to send email {message_id}")
                 self.current_batch_stats["emails_failed"] += 1
                 return False, False  # Failed, not a draft
-                
+            
         except Exception as e:
-            logger.exception(f"Error processing email: {str(e)}")
+            logger.exception(f"Error processing email {message_id}: {str(e)}")
             if email.get("save_as_draft", False):
                 self.current_batch_stats["drafts_failed"] += 1
             else:
                 self.current_batch_stats["emails_failed"] += 1
             return False, email.get("save_as_draft", False)
-    
+        
     def process_draft_emails(self, batch_id=None):
         """Process emails that should be saved as drafts."""
         try:
@@ -538,9 +626,26 @@ class EmailProcessor:
             
             if not drafts:
                 logger.info("No emails to save as drafts.")
-                return 0, 0
                 
+                # Debug check to find emails by response labels
+                response_emails = list(self.mongo.collection.find({
+                    "prediction": {"$in": self.config.response_labels},
+                    "response": {"$exists": True, "$ne": ""},
+                    "response_sent": False
+                }).limit(10))
+                
+                if response_emails:
+                    logger.info(f"Found {len(response_emails)} emails with response labels that need responses")
+                    for email in response_emails:
+                        logger.info(f"Email ID: {email.get('message_id')}, Label: {email.get('prediction')}, Has Response: {bool(email.get('response'))}, Save as Draft: {email.get('save_as_draft')}")
+                
+                return 0, 0
+                    
             logger.info(f"Found {len(drafts)} emails to save as drafts")
+            
+            # Log details about the found drafts
+            for i, email in enumerate(drafts[:5]):  # Log details for first 5 drafts
+                logger.info(f"Draft {i+1}: ID={email.get('message_id')}, Label={email.get('prediction')}, Has Response={bool(email.get('response'))}")
             
             # Process each draft email
             for email in drafts:
@@ -551,16 +656,44 @@ class EmailProcessor:
                 self._update_postgres_batch(batch_id, "draft")
                 
             logger.info(f"Draft processing complete: {self.current_batch_stats['drafts_created']} saved as drafts, "
-                       f"{self.current_batch_stats['drafts_failed']} failed")
-                       
+                    f"{self.current_batch_stats['drafts_failed']} failed")
+                    
             return self.current_batch_stats["drafts_created"], self.current_batch_stats["drafts_failed"]
-            
+                
         except Exception as e:
             logger.exception(f"Error processing draft emails: {str(e)}")
             return 0, 0
     
     def send_pending_replies(self, batch_id=None):
         """Send all pending email replies with valid responses."""
+        # If mail sending is disabled or forcing drafts, mark all pending emails as draft
+        if not MAIL_SEND_ENABLED or FORCE_DRAFTS:
+            logger.info(f"Mail sending is disabled (MAIL_SEND_ENABLED={MAIL_SEND_ENABLED}) or forced to drafts (FORCE_DRAFTS={FORCE_DRAFTS})")
+            logger.info("Converting all pending replies to drafts instead of sending...")
+            
+            try:
+                # Update all pending emails to be saved as drafts
+                update_result = self.mongo.collection.update_many(
+                    {
+                        "response": {"$exists": True, "$ne": None},
+                        "response_sent": {"$ne": True},
+                        "save_as_draft": {"$ne": True},
+                        "prediction": {"$in": self.config.response_labels}
+                    },
+                    {"$set": {"save_as_draft": True}}
+                )
+                
+                if update_result.modified_count > 0:
+                    logger.info(f"Updated {update_result.modified_count} emails to be saved as drafts")
+                    # Now process them as drafts 
+                    return self.process_draft_emails(batch_id)
+                else:
+                    logger.info("No emails needed to be updated to draft mode")
+                    return 0, 0
+            except Exception as e:
+                logger.error(f"Error updating emails to draft mode: {str(e)}")
+                return 0, 0
+        
         try:
             # Reset batch stats for sending
             self.current_batch_stats = {
@@ -603,9 +736,11 @@ class EmailProcessor:
                 except Exception as e:
                     logger.exception(f"Error processing email id={email.get('_id')}: {str(e)}")
                     self.current_batch_stats["emails_failed"] += 1
+            
             # Update PostgreSQL batch if provided
             if batch_id:
                 self._update_postgres_batch(batch_id, "send")
+            
             # Log summary
             logger.info(f"Email processing summary: {self.current_batch_stats['emails_sent']} sent, "
                         f"{self.current_batch_stats['emails_skipped']} skipped, "
@@ -619,84 +754,105 @@ class EmailProcessor:
     def get_email_stats(self):
         """Return current email stats dictionary."""
         return self.current_batch_stats
-class EmailProcessingSystem:
-    """Main class that orchestrates the email processing system."""
-    
-    def __init__(self):
-        self.config = Config()
-        self.auth_manager = MSGraphAuth(self.config)
-        self.email_validator = EmailValidator(self.config)
-        self.email_sender = EmailSender(self.config, self.auth_manager)
-        self.email_processor = EmailProcessor(self.config, self.email_validator, self.email_sender)
-    
-    def run(self, batch_id=None):
-        """Run the email processing system."""
-        try:
-            logger.info("Running email processing system...")
-            
-            # First process draft emails
-            draft_success, draft_failed = self.email_processor.process_draft_emails(batch_id)
-            
-            # Then send regular emails
-            sent_success, sent_failed = self.email_processor.send_pending_replies(batch_id)
-            
-            logger.info(f"Email processing complete: {sent_success} sent, {draft_success} saved as drafts")
-            logger.info("Completed email processing system execution.")
-            
-            # Get complete stats
-            stats = self.email_processor.get_email_stats()
-            
-            return draft_success, draft_failed, sent_success, sent_failed, stats
-            
-        except Exception as e:
-            logger.error(f"Fatal error in email processing system: {str(e)}")
-            raise
-# Define standalone functions that are exported to other modules
-def send_email(to_address, subject, body):
-    """Standalone function for sending an email."""
+
+
+# ========================
+# Public interface functions for other modules to use
+# ========================
+
+def get_email_sender():
+    """Get a configured email sender instance."""
     config = Config()
     auth_manager = MSGraphAuth(config)
-    email_sender = EmailSender(config, auth_manager)
-    return email_sender.send_email(to_address, subject, body)
-def save_as_draft(to_address, subject, body):
-    """Standalone function for saving an email as draft."""
-    config = Config()
-    auth_manager = MSGraphAuth(config)
-    email_sender = EmailSender(config, auth_manager)
-    return email_sender.save_as_draft(to_address, subject, body)
+    return EmailSender(config, auth_manager)
+
+
+def save_as_draft(to_address, subject, body, message_id=None, batch_id=None):
+    """Save an email as draft and update databases."""
+    email_sender = get_email_sender()
+    return email_sender.save_as_draft(to_address, subject, body, message_id, batch_id)
+
+
+def send_email(to_address, subject, body, message_id=None, batch_id=None):
+    """Send an email directly and update databases."""
+    # Safety check - never send if mail sending is disabled or force drafts is enabled
+    if not MAIL_SEND_ENABLED or FORCE_DRAFTS:
+        logger.warning(f"⚠️ ATTEMPTED TO SEND EMAIL TO {to_address}, BUT MAIL_SEND_ENABLED={MAIL_SEND_ENABLED} OR FORCE_DRAFTS={FORCE_DRAFTS}")
+        logger.info("Saving as draft instead of sending due to environment configuration")
+        return save_as_draft(to_address, subject, body, message_id, batch_id)
+    
+    email_sender = get_email_sender()
+    return email_sender.send_email(to_address, subject, body, message_id, batch_id)
+
+
 def process_draft_emails(batch_id=None):
-    """Standalone function for processing draft emails."""
-    system = EmailProcessingSystem()
-    return system.email_processor.process_draft_emails(batch_id)
+    """Process all emails marked for draft in a batch."""
+    config = Config()
+    auth_manager = MSGraphAuth(config)
+    email_validator = EmailValidator(config)
+    email_sender = EmailSender(config, auth_manager)
+    email_processor = EmailProcessor(config, email_validator, email_sender)
+    return email_processor.process_draft_emails(batch_id)
+
+
 def send_pending_replies(batch_id=None):
-    """Standalone function for sending pending replies."""
-    system = EmailProcessingSystem()
-    return system.email_processor.send_pending_replies(batch_id)
-# Main execution
+    """Send all pending replies in a batch."""
+    config = Config()
+    auth_manager = MSGraphAuth(config)
+    email_validator = EmailValidator(config)
+    email_sender = EmailSender(config, auth_manager)
+    email_processor = EmailProcessor(config, email_validator, email_sender)
+    return email_processor.send_pending_replies(batch_id)
+
+
+def process_emails_for_batch(batch_id):
+    """Process all emails for a specific batch - both drafts and pending."""
+    config = Config()
+    auth_manager = MSGraphAuth(config)
+    email_validator = EmailValidator(config)
+    email_sender = EmailSender(config, auth_manager)
+    email_processor = EmailProcessor(config, email_validator, email_sender)
+    
+    # First process drafts
+    draft_success, draft_failed = email_processor.process_draft_emails(batch_id)
+    
+    # Then process pending replies
+    sent_success, sent_failed = email_processor.send_pending_replies(batch_id)
+    
+    return {
+        "drafts_created": draft_success,
+        "drafts_failed": draft_failed,
+        "emails_sent": sent_success,
+        "emails_failed": sent_failed,
+        "emails_skipped": email_processor.current_batch_stats["emails_skipped"]
+    }
+
+
+# Main execution (when run directly)
 if __name__ == "__main__":
     try:
         # Parse batch_id from command line if provided
-        batch_id = sys.argv[1] if len(sys.argv) > 1 else None
-        if batch_id:
+        if len(sys.argv) > 1:
+            batch_id = sys.argv[1]
             logger.info(f"Processing emails for batch ID: {batch_id}")
-        
-        # Create and run the email processing system
-        email_system = EmailProcessingSystem()
-        draft_success, draft_failed, sent_success, sent_failed, stats = email_system.run(batch_id)
-        
-        # Generate a summary table in logs
-        logger.info("   EMAIL PROCESSING SUMMARY")
-        logger.info(f"Emails Sent:       {sent_success}")
-        logger.info(f"Drafts Created:    {draft_success}")
-        logger.info(f"Emails Failed:     {sent_failed}")
-        logger.info(f"Drafts Failed:     {draft_failed}")
-        logger.info(f"Emails Skipped:    {stats['emails_skipped']}")
-        
-        # Exit with appropriate code
-        if sent_failed > 0 or draft_failed > 0:
-            sys.exit(1)
+            stats = process_emails_for_batch(batch_id)
+            
+            # Generate a summary table in logs
+            logger.info("   EMAIL PROCESSING SUMMARY")
+            logger.info(f"Emails Sent:       {stats['emails_sent']}")
+            logger.info(f"Drafts Created:    {stats['drafts_created']}")
+            logger.info(f"Emails Failed:     {stats['emails_failed']}")
+            logger.info(f"Drafts Failed:     {stats['drafts_failed']}")
+            logger.info(f"Emails Skipped:    {stats['emails_skipped']}")
+            
+            # Exit with appropriate code
+            if stats['emails_failed'] > 0 or stats['drafts_failed'] > 0:
+                sys.exit(1)
+            else:
+                sys.exit(0)
         else:
-            sys.exit(0)
+            logger.error("No batch ID provided. Usage: python email_sender.py <batch_id>")
+            sys.exit(1)
             
     except Exception as e:
         logger.error(f"Fatal error: {str(e)}")

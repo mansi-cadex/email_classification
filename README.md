@@ -1,26 +1,41 @@
+# Email Classification System
 
-```markdown
-# Email Processing System - Client Side
+A modular email processing system that automatically classifies incoming emails, generates appropriate responses, and manages email organization through Microsoft Graph API.
 
 ## Overview
 
-This email processing system is designed to automatically fetch, classify, and respond to emails based on their content. The system uses a decoupled architecture with two main components:
+The Email Classification System provides an automated workflow for:
+1. Fetching unread emails from a Microsoft Outlook inbox
+2. Classifying emails using a machine learning model
+3. Moving emails to appropriate folders based on classification
+4. Generating appropriate responses based on email content
+5. Either saving responses as drafts or sending them directly
+6. Exporting processed data to Excel reports
 
-1. **Client Side** (this repository): Handles email fetching, processing, and sending
-2. **Model Server**: Handles AI/ML-based classification and response generation (in a separate repository)
+The system operates in batch mode, processing emails at regular intervals with comprehensive error handling and recovery mechanisms.
 
-## Architecture
+## System Architecture
 
-### Client-Side Components
+```
+email_classification/
+├── src/
+│   ├── fetch_reply.py        # Email fetching and classification
+│   ├── email_sender.py       # Email sending and draft creation
+│   ├── db.py                 # Database connections (MongoDB and PostgreSQL)
+│   ├── log_config.py         # Logging configuration
+├── loop.py                   # Batch processing and orchestration
+├── main.py                   # Application entry point
+```
 
-- **Email Fetching**: Connects to Microsoft Graph API to retrieve unread emails
-- **Batch Processing**: Manages batches of emails for efficient processing
-- **Email Sending**: Sends responses or saves drafts based on classification
-- **Database Integration**: Stores processed emails in MongoDB and PostgreSQL
-- **SFTP Export**: Uploads processed data as Excel files to SFTP server (optional)
+### Component Responsibilities
 
-### Key Files
+1. **main.py**: Application entry point with command-line interface
+   - Initializes logging
+   - Parses command-line arguments
+   - Starts the appropriate processing mode
+   - Handles graceful shutdown and error reporting
 
+HEAD
 email_classification/
 ├── src/
 │   ├── fetch_reply.py        # Email fetching and processing
@@ -31,152 +46,207 @@ email_classification/
 ├── main.py                   # Application entry point
 
 
-## Prerequisites
+2. **src/fetch_reply.py**: Email fetching and classification
+   - Connects to Microsoft Graph API for email access
+   - Fetches unread emails from the inbox
+   - Classifies emails using the model API
+   - Moves emails to appropriate folders based on classification
+   - Stores email data in MongoDB
 
-- Python 3.9+
+3. **src/email_sender.py**: Email sending and draft creation
+   - Creates draft emails in Outlook
+   - Sends email replies when appropriate
+   - Updates email status in the database
+   - Handles Microsoft Graph API for email creation/sending
+
+4. **src/db.py**: Database operations
+   - Provides interfaces for MongoDB operations
+   - Provides interfaces for PostgreSQL operations
+   - Handles data synchronization between databases
+   - Manages batch tracking and status updates
+
+5. **loop.py**: Batch processing and orchestration
+   - Manages batch lifecycle (create, process, finalize)
+   - Retries failed batches with exponential backoff
+   - Exports data to Excel reports
+   - Uploads reports to SFTP
+   - Schedules email processing at regular intervals
+
+## Installation
+
+### Prerequisites
+
+- Python 3.8 or higher
 - MongoDB
 - PostgreSQL
+- SFTP server (optional, for reports)
 - Microsoft Graph API credentials
-- Model Server running and accessible
 
-## Setup
+### Setup
 
+HEAD
 1. **Clone the Repository**
    ```
    git clone https://github.com/SanskarCadex/email_classification.git
    cd email_classification
+
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/yourusername/email-classification-system.git
+   cd email-classification-system
    ```
 
-2. **Install Dependencies**
-   ```
+2. Install dependencies:
+   ```bash
    pip install -r requirements.txt
    ```
 
-3. **Set Up MongoDB**
-   - Install MongoDB
-   - Create a database named `emailDB` (or your preferred name, configurable in .env)
-
-4. **Set Up PostgreSQL**
-   - Install PostgreSQL
-   - Create a database (name provided by your organization)
-   - Ensure the database has a schema named `core` with these tables:
-     - `batch_runs`
-     - `account_email`
-
-5. **Environment Variables**
-   Create a `.env` file with the following variables:
+3. Create a `.env` file with the following environment variables:
    ```
-   # Microsoft Graph API credentials
+   # Microsoft Graph API
    CLIENT_ID=your_client_id
    CLIENT_SECRET=your_client_secret
-   AUTHORITY=https://login.microsoftonline.com/common
+   TENANT_ID=your_tenant_id
+   EMAIL_ADDRESS=your_email@example.com
    
-   # Email configuration
-   SENDER_EMAIL=your_email@domain.com
-   YOUR_DOMAIN=yourdomain.com
-   COMPANY_NAME=Your Company
-   
-   # Model Server configuration
-   MODEL_API_URL=http://localhost:8000
-   
-   # Database configuration
+   # MongoDB
    MONGO_URI=mongodb://localhost:27017
    MONGO_DB=emailDB
-   PGHOST=your_postgres_host
-   PGPORT=5432
-   PGDATABASE=your_postgres_database
-   PGUSER=your_postgres_user
-   PGPASSWORD=your_postgres_password
+   MONGO_COLLECTION=classified_emails
    
-   # Batch processing
+   # PostgreSQL
+   PGHOST=localhost
+   PGPORT=5432
+   PGDATABASE=email_system
+   PGUSER=postgres
+   PGPASSWORD=your_password
+   
+   # Email Configuration
+   MAIL_SEND_ENABLED=False
+   FORCE_DRAFTS=True
+   ADD_EMAIL_FOOTER=True
+   
+   # Batch Configuration
    BATCH_SIZE=125
    BATCH_INTERVAL=600
-   TIME_FILTER_HOURS=24
+   MAX_RETRIES=3
+   RETRY_DELAY=60
+   BATCH_TIMEOUT=900
    
-   # SFTP configuration (if needed)
-   SFTP_ENABLED=True
-   SFTP_HOST=sftp.example.com
+   # SFTP Configuration
+   SFTP_ENABLED=False
+   SFTP_HOST=your_sftp_host
    SFTP_PORT=22
-   SFTP_USERNAME=username
-   SFTP_PASSWORD=password
+   SFTP_USERNAME=your_username
+   SFTP_PASSWORD=your_password
    
-   # Email sending
-   MAIL_SEND_ENABLED=False  # Set to True to enable actual email sending
+   # Model API
+   MODEL_API_URL=http://localhost:8000
+   
+   # Logging
+   LOG_LEVEL=INFO
+   LOG_DIR=logs
+   ```
+
+4. Set up the database schema:
+   ```bash
+   psql -U your_username -d email_system -f schema.sql
    ```
 
 ## Usage
 
 ### Running the Application
 
-1. **Start the Model Server First** (from the model server repository)
-   ```
-   cd model_server
-   python main.py
-   ```
+The system can be run in different modes:
 
-2. **Run the Client Application**
-   ```
-   python main.py
+1. **Daemon Mode** (continuous operation):
+   ```bash
+   python main.py --mode daemon
    ```
 
-This will start the email processing system, which will:
-1. Fetch unread emails from Microsoft Graph API
-2. Send emails to the model server for classification
-3. Generate appropriate responses
-4. Send responses or save as drafts based on classification
-5. Export processed data to SFTP (if enabled)
+2. **Single Batch Mode** (process a single batch):
+   ```bash
+   python main.py --mode single
+   ```
 
-### Batch Processing
+3. **Retry Mode** (retry failed batches):
+   ```bash
+   python main.py --mode retry
+   ```
 
-The system processes emails in batches for efficiency. You can configure:
-- `BATCH_SIZE`: Number of emails to process in each batch
-- `BATCH_INTERVAL`: Time between batch processing (in seconds)
-- `TIME_FILTER_HOURS`: Only process emails received within this many hours
+4. **Cleanup Mode** (mark failed batches as permanently failed):
+   ```bash
+   python main.py --mode cleanup
+   ```
 
-### Email Classification
+### Command-Line Options
 
-Emails are classified into the following categories:
-- `no_reply_no_info`: Informational emails that don't need a response
-- `no_reply_with_info`: Informational emails with useful contact information
-- `auto_reply_no_info`: Automatic replies without alternative contact details
-- `auto_reply_with_info`: Automatic replies with alternative contact information
-- `invoice_request_no_info`: Invoice requests without specific details
-- `claims_paid_no_proof`: Payment claims without evidence or attachments
-- `manual_review`: Complex emails that need human review
+```
+usage: main.py [-h] [--mode {daemon,single,retry,cleanup}] [--batch-id BATCH_ID] [--batch-size BATCH_SIZE] [--interval INTERVAL] [--send-mail] [--force-drafts]
 
-### Logging
+Email Classification System
 
-Logs are stored in the `logs` directory by default. Configure the log location in `src/log_config.py`.
+optional arguments:
+  -h, --help            show this help message and exit
+  --mode {daemon,single,retry,cleanup}, -m {daemon,single,retry,cleanup}
+                        Operation mode - daemon (continuous), single (one batch), retry (failed batches), cleanup (mark failed batches)
+  --batch-id BATCH_ID, -b BATCH_ID
+                        Process a specific batch ID (only used with single mode)
+  --batch-size BATCH_SIZE, -s BATCH_SIZE
+                        Override batch size from environment variable
+  --interval INTERVAL, -i INTERVAL
+                        Override batch interval in seconds from environment variable
+  --send-mail           Enable mail sending regardless of environment setting
+  --force-drafts        Force all emails to be saved as drafts regardless of environment setting
+```
 
-## Security Notes
+## Email Classification Categories
 
-- Store sensitive credentials in environment variables, not in the code
-- Ensure proper access controls for the database
-- Use strong passwords for all services
-- Consider encrypting sensitive data in the database
+The system classifies emails into the following categories:
 
-## Troubleshooting
+1. **no_reply_no_info**: No response needed, no information to extract
+2. **no_reply_with_info**: No response needed, but contains information to extract
+3. **auto_reply_no_info**: Auto-reply detected, no information to extract
+4. **auto_reply_with_info**: Auto-reply detected with information to extract
+5. **invoice_request_no_info**: Invoice request without specific invoice information
+6. **claims_paid_no_proof**: Payment claim without proof of payment
+7. **manual_review**: Requires manual review by a human operator
 
-### Common Issues
+## Batch Processing Flow
 
-1. **Authentication Errors**
-   - Check your Microsoft Graph API credentials
-   - Run `fetch_reply.py` manually to initialize authentication
+1. A new batch is created with a unique ID
+2. Unread emails are fetched from the inbox
+3. Each email is classified and stored in MongoDB
+4. Emails are moved to appropriate folders based on classification
+5. Responses are generated for emails that require replies
+6. Responses are either saved as drafts or sent directly
+7. Batch status is updated in both MongoDB and PostgreSQL
+8. Excel report is generated and uploaded to SFTP (if enabled)
+9. System waits for the next interval to process a new batch
 
-2. **Database Connection Issues**
-   - Verify MongoDB and PostgreSQL are running
-   - Check connection strings and credentials
+## Error Handling and Recovery
 
-3. **Model Server Connection Issues**
-   - Ensure the model server is running
-   - Check the `MODEL_API_URL` environment variable
+The system includes comprehensive error handling:
+
+1. **Automatic Retries**: Failed operations are retried with exponential backoff
+2. **Batch Recovery**: Failed batches are retried automatically
+3. **Transaction Safety**: Database operations use transactions where appropriate
+4. **Graceful Degradation**: System continues operating even when components fail
+5. **Detailed Logging**: All operations are logged with appropriate detail
+
+## Monitoring and Reporting
+
+1. **Logs**: Detailed logs are stored in the configured log directory
+2. **Excel Reports**: Each batch generates an Excel report with processing details
+3. **Database Records**: All operations are recorded in MongoDB and PostgreSQL
+4. **Status Tracking**: Batch status is tracked throughout the processing lifecycle
+
+
 
 ## Contributing
 
 1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/your-feature`)
-3. Commit your changes (`git commit -am 'Add some feature'`)
-4. Push to the branch (`git push origin feature/your-feature`)
-5. Create a new Pull Request
-```
-
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
