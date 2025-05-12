@@ -18,7 +18,7 @@ import logging
 from datetime import datetime
 from dotenv import load_dotenv
 from src.log_config import logger
-from loop import run_email_processor, clean_failed_batches, retry_failed_batches, process_batch
+from loop import clean_failed_batches, retry_failed_batches, process_batch
 
 
 # Emergency exit handler - will force exit immediately
@@ -93,7 +93,7 @@ def main():
     logger.info("=== Email Processing System Starting ===")
     logger.info("Settings:")
     logger.info(f"- MAIL_SEND_ENABLED: {os.getenv('MAIL_SEND_ENABLED', 'False')}")
-    logger.info(f"- FORCE_DRAFTS: {os.getenv('FORCE_DRAFTS', 'True')}")
+    logger.info(f"- FORCE_DRAFTS: {os.getenv('FORCE_DRAFTS', 'False')}")
     logger.info(f"- SFTP_ENABLED: {os.getenv('SFTP_ENABLED', 'False')}")
     logger.info(f"- BATCH_SIZE: {os.getenv('BATCH_SIZE', '125')}")
     logger.info(f"- BATCH_INTERVAL: {os.getenv('BATCH_INTERVAL', '600')} seconds")

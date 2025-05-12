@@ -11,16 +11,14 @@ operations, with consistent error handling and transaction management.
 """
 
 import os
-import sys
 import uuid
 from functools import lru_cache
 from pymongo import MongoClient, ASCENDING
 from pymongo.errors import DuplicateKeyError, PyMongoError
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict, List, Optional, Union, Any, Tuple
-import psycopg2
-from psycopg2 import pool, extras, errors
-
+from psycopg2 import pool, extras
+from psycopg2.extras import execute_batch
 from src.log_config import logger
 
 # =====================================
@@ -135,7 +133,7 @@ class MongoConnector:
         except Exception as e:
             logger.error(f"Error setting up MongoDB indexes: {str(e)}")
             raise
-
+    
     def _validate_and_process_email(self, email_data):
         """Validate and process email data before inserting/updating."""
         try:
@@ -227,25 +225,24 @@ class MongoConnector:
             return None
 
     def email_exists(self, message_id: str, sender: str = None, subject: str = None, received_at: str = None) -> bool:
-        """Check if an email with the same message_id or (sender, subject, received_at) exists."""
+        """Check if an email with the given message_id exists.
+        
+        Args:
+            message_id (str): The message ID to check
+            sender (str, optional): Unused parameter kept for backward compatibility
+            subject (str, optional): Unused parameter kept for backward compatibility
+            received_at (str, optional): Unused parameter kept for backward compatibility
+            
+        Returns:
+            bool: True if an email with the message_id exists, False otherwise
+        """
         try:
-            if message_id:
-                existing_email = self.collection.find_one({"message_id": message_id})
-                if existing_email:
-                    return existing_email.get("response_sent") is not None
-                    
-            if sender and subject and received_at:
-                duplicate_email = self.collection.find_one({
-                    "sender": sender,
-                    "subject": subject,
-                    "received_at": received_at
-                })
-                if duplicate_email:
-                    return duplicate_email.get("response_sent") is not None
-                    
-            return False
+            if not message_id:
+                return False                    # nothing to check
+            return self.collection.count_documents({"message_id": message_id}, limit = 1) > 0
+
         except Exception as e:
-            logger.error(f"Error checking if email exists: {str(e)}")
+            logger.error(f"Error checking if email exists: {e}")
             return False
 
     def find_emails(self, query: Dict[str, Any], *args, **kwargs) -> List[Dict[str, Any]]:
@@ -268,7 +265,29 @@ class MongoConnector:
         except Exception as e:
             logger.error(f"Error finding pending responses: {str(e)}")
             return []
+    # Add this method inside the MongoConnector class in db.py
+    def update_message_id(self, old_id, new_id):
+        """Update message ID after a successful move operation."""
+        try:
+            if not old_id or not new_id:
+                logger.warning("Cannot update message ID: Missing old_id or new_id")
+                return False
+                
+            result = self.collection.update_one(
+                {"message_id": old_id},
+                {"$set": {"message_id": new_id, "previous_message_id": old_id}}
+            )
             
+            if result.modified_count > 0:
+                logger.info(f"Updated message ID from {old_id} to {new_id}")
+                return True
+            else:
+                logger.warning(f"No document found with message_id: {old_id}")
+                return False
+        except Exception as e:
+            logger.error(f"Error updating message ID: {str(e)}")
+            return False
+
     def find_draft_emails(self, batch_id: Optional[str] = None, limit: int = 50) -> List[Dict[str, Any]]:
         """Find emails that should be saved as drafts."""
         try:
@@ -679,76 +698,102 @@ class MongoConnector:
     
     def sync_batch_emails_to_postgres(self, batch_id: str) -> int:
         """
-        Synchronize emails from MongoDB to PostgreSQL for reporting.
-        
-        Args:
-            batch_id: The batch ID to synchronize
-            
-        Returns:
-            int: Number of records synchronized
+        Up-sert Mongo e-mails into core.account_email *without* requiring a
+        UNIQUE constraint on message_id.
+
+        Strategy:
+        1. For each mail → try an UPDATE on message_id.
+            • if rowcount == 0 → queue for INSERT
+        2. Bulk-insert anything new with execute_batch().
         """
+        if not batch_id:
+            logger.warning("sync_batch_emails_to_postgres called without batch_id")
+            return 0
+
+        pg_conn = get_postgres()
+        if not pg_conn:
+            logger.error("PG connection unavailable – aborting sync")
+            return 0
+
         try:
-            if not batch_id:
-                logger.warning("Cannot sync emails to PostgreSQL: No batch_id provided")
-                return 0
-                
-            # Get PostgreSQL connection (will use the PostgreSQLConnector class)
-            pg_conn = PostgresConnector.get_connection()
-            
-            if not pg_conn:
-                logger.error("Failed to get PostgreSQL connection for sync")
-                return 0
-                
-            # Find all emails for this batch
-            batch_emails = self.collection.find({"batch_id": batch_id})
-            
-            sync_count = 0
-            with pg_conn.cursor() as cursor:
-                for email in batch_emails:
-                    # Extract needed fields
-                    message_id = email.get("message_id")
-                    sender = email.get("sender", "")
-                    recipient = email.get("recipient", "")
-                    subject = email.get("subject", "")
-                    classification = email.get("prediction", "")
-                    confidence = email.get("confidence", 0.0)
-                    processed_at = email.get("processed_at", datetime.utcnow().isoformat())
-                    has_response = bool(email.get("response"))
-                    response_sent = email.get("response_sent", False)
-                    draft_saved = email.get("draft_saved", False)
-                    
-                    # Convert processed_at to datetime if it's a string
-                    if isinstance(processed_at, str):
-                        processed_at = datetime.fromisoformat(processed_at.replace('Z', '+00:00'))
-                    
-                    # Insert or update in PostgreSQL
-                    cursor.execute("""
-                        INSERT INTO core.email_records 
-                        (message_id, sender, recipient, subject, classification, confidence, 
-                         processed_at, batch_id, has_response, response_sent, draft_saved)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                        ON CONFLICT (message_id) 
-                        DO UPDATE SET 
-                            classification = EXCLUDED.classification,
-                            confidence = EXCLUDED.confidence,
-                            has_response = EXCLUDED.has_response,
-                            response_sent = EXCLUDED.response_sent,
-                            draft_saved = EXCLUDED.draft_saved
-                    """, (
-                        message_id, sender, recipient, subject, classification, confidence,
-                        processed_at, batch_id, has_response, response_sent, draft_saved
+            mails = self.collection.find({"batch_id": batch_id})
+            inserts: list[Tuple] = []
+            processed = 0
+
+            update_sql = """
+                UPDATE core.account_email SET
+                    from_email          = %s,
+                    to_email            = %s,
+                    email_subject       = %s,
+                    email_body          = %s,
+                    is_sent             = %s,
+                    batch_id            = %s,
+                    outlook_message_id  = %s,
+                    created_at          = COALESCE(created_at, %s)   -- keep original if present
+                WHERE message_id = %s
+            """
+
+            insert_sql = """
+                INSERT INTO core.account_email (
+                    conversation_id, receiver_type, sender_name,
+                    from_email, to_email, cc, email_subject, email_body,
+                    debtor_number, debtor_id, user_id, is_sent, eml_file,
+                    created_at, outlook_message_id, message_id, hash, batch_id
+                )
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            """
+
+            cur = pg_conn.cursor()
+
+            for m in mails:
+                # ---------- mandatory fall-backs -------------
+                to_email      = m.get("recipient") or ""
+                subject       = m.get("subject") or "No Subject"
+                created_at    = m.get("created_at") or datetime.utcnow()
+                is_sent_flag  = bool(m.get("response_sent"))
+
+                # ---------- first try UPDATE -----------------
+                cur.execute(
+                    update_sql,
+                    (
+                        m.get("sender"),       to_email,    subject,
+                        m.get("body", m.get("text", "")),
+                        is_sent_flag,          batch_id,
+                        m.get("outlook_message_id"),
+                        created_at,            m.get("message_id")
+                    )
+                )
+
+                if cur.rowcount == 0:                      # nothing updated → queue insert
+                    inserts.append((
+                        m.get("conversation_id"), m.get("receiver_type"), m.get("sender"),
+                        m.get("sender"),          to_email,               None,
+                        subject,                  m.get("body", m.get("text", "")),
+                        m.get("debtor_number"),   m.get("debtor_id"),     m.get("user_id"),
+                        is_sent_flag,             None,
+                        created_at,               m.get("outlook_message_id"),
+                        m.get("message_id"),      None,                   batch_id
                     ))
-                    sync_count += 1
-                
+
+                processed += 1
+
+            # ---------- bulk insert newbies -----------------
+            if inserts:
+                execute_batch(cur, insert_sql, inserts, page_size=500)
+
             pg_conn.commit()
-            logger.info(f"Synchronized {sync_count} emails to PostgreSQL for batch {batch_id}")
-            return sync_count
+            logger.info("PG-sync complete – %s processed, %s inserted (batch %s)",
+                        processed, len(inserts), batch_id)
+            return processed
+
         except Exception as e:
-            logger.error(f"Error synchronizing emails to PostgreSQL: {str(e)}")
+            if pg_conn:
+                pg_conn.rollback()
+            logger.error("Error syncing emails to PG: %s", e)
             return 0
         finally:
-            if 'pg_conn' in locals() and pg_conn:
-                pg_conn.close()
+            if pg_conn:
+                PostgresConnector.return_connection(pg_conn)
 
     def close(self):
         """Close the MongoDB client."""
@@ -811,6 +856,52 @@ class PostgresConnector:
                 cls._pool.putconn(conn)
             except Exception as e:
                 logger.error(f"Error returning connection to pool: {str(e)}")
+
+    # Replace the current PostgresConnector.ping() method with this:
+    @staticmethod
+    def ping() -> bool:
+        """
+        Quick “is the database alive?” check.
+
+        Returns
+        -------
+        bool
+            True  – connection succeeded and a simple `SELECT 1` ran
+            False – any exception occurred (logged for debugging)
+        """
+        try:
+            # use the built-in context-manager so the connection
+            # is automatically returned to the pool
+            with PostgresConnector.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT 1")
+            return True
+        except Exception as exc:
+            logger.error("PostgreSQL ping failed: %s", exc)
+            return False
+            
+    @classmethod
+    def connection(cls):
+        """Context manager for PostgreSQL connections.
+        
+        Usage:
+            with PostgresConnector.connection() as conn:
+                # Use the connection here
+                # It will be automatically returned to the pool
+        """
+        class ConnectionManager:
+            def __init__(self):
+                self.conn = None
+                
+            def __enter__(self):
+                self.conn = cls.get_connection()
+                return self.conn
+                
+            def __exit__(self, exc_type, exc_val, exc_tb):
+                if self.conn:
+                    cls.return_connection(self.conn)
+        
+        return ConnectionManager()
 
     @staticmethod
     def execute_query(query, params=None, fetch=True, commit=True):
@@ -1112,6 +1203,8 @@ class PostgresConnector:
                 'period_days': days,
                 'error': str(e)
             }
+        
+    
 
 
 # =====================================

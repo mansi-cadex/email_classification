@@ -19,10 +19,9 @@ import uuid
 import io
 import socket
 import pandas as pd
-import paramiko
-from paramiko import SSHClient, SFTPClient
+import paramiko 
+from paramiko import SSHClient
 from scp import SCPClient
-import re
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from typing import Tuple, Dict, List, Optional, Any, Union, Callable
@@ -131,7 +130,8 @@ def ensure_batch_record_exists(batch_id: str) -> bool:
                     pg_conn.commit()
                     logger.info(f"Created missing batch record in PostgreSQL: {batch_id}")
         finally:
-            pg_conn.close()
+            if pg_conn:
+                PostgresConnector.return_connection(pg_conn)
         
         # Check MongoDB
         mongo = get_mongo()
@@ -159,65 +159,43 @@ def ensure_batch_record_exists(batch_id: str) -> bool:
         return False
 
 
-def update_batch_id_only(batch_id: str, limit: int = 1, email_data: Optional[Dict] = None) -> int:
-    """Insert a record with batch_id and either real email data or dummy values in PostgreSQL.
-    
-    Args:
-        batch_id: The batch ID to update
-        limit: Maximum number of records to update
-        email_data: Optional email data to use
-        
-    Returns:
-        int: Number of records updated
-    """
+def update_batch_id_only(batch_id, limit=1, email_data=None):
+    """Insert a record with batch_id and either real email data or dummy values in PostgreSQL."""
     if not batch_id:
         logger.warning("No batch_id provided to update_batch_id_only()")
         return 0
 
-    pg_conn = None
+    conn = None
     try:
-        pg_conn = get_postgres()
-        if not pg_conn:
+        conn = get_postgres()
+        if not conn:
             logger.error("Failed to get PostgreSQL connection")
             return 0
             
-        pg_conn.autocommit = True
-        with pg_conn.cursor() as cur:
+        conn.autocommit = True
+        with conn.cursor() as cur:
             # Use real email data when available
             if email_data and isinstance(email_data, dict):
                 to_email = email_data.get('to_email', email_data.get('recipient', ''))
                 from_email = email_data.get('from_email', email_data.get('sender', ''))
                 email_subject = email_data.get('subject', email_data.get('email_subject', ''))
                 is_sent = email_data.get('is_sent', False)
-                
-                # Get reply_sent status from the email data
-                if email_data.get("response_sent"):
-                    reply_sent = "sent"
-                elif email_data.get("draft_saved"):
-                    reply_sent = "draft"
-                elif email_data.get("prediction") in RESPONSE_LABELS:
-                    # Should have a reply, but it failed somewhere
-                    reply_sent = "reply_missing"
-                else:
-                    reply_sent = "no_response"
             else:
                 # If no email_data is provided, use minimal values to prevent NULL
                 to_email = ''
                 from_email = 'system@abc-amega.com'  # Default from_email to prevent NULL
                 email_subject = ''
                 is_sent = False
-                reply_sent = 'no_response'
                 logger.debug("No email data provided. Using minimal values to prevent NULL.")
             
-            # Insert with appropriate values
+            # Insert with appropriate values, ensuring from_email is never NULL
             cur.execute(
                 """
                 INSERT INTO core.account_email
-                       (batch_id, to_email, from_email, email_subject,
-                        reply_status, is_sent)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                       (batch_id, to_email, from_email, email_subject, is_sent)
+                VALUES (%s, %s, %s, %s, %s)
                 """,
-                (batch_id, to_email, from_email, email_subject, reply_sent, is_sent)
+                (batch_id, to_email, from_email, email_subject, is_sent)
             )
             
             logger.info(f"Successfully inserted batch_id={batch_id} into account_email")
@@ -227,9 +205,8 @@ def update_batch_id_only(batch_id: str, limit: int = 1, email_data: Optional[Dic
         logger.error(f"Error in update_batch_id_only: {str(exc)}")
         return 0
     finally:
-        if pg_conn:
-            pg_conn.close()
-
+        if conn:
+            PostgresConnector.return_connection(conn)
 
 # ==========================
 # SFTP Operations

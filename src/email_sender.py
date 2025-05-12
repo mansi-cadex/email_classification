@@ -16,6 +16,8 @@ import base64
 import httpx
 import msal
 import time
+import random
+from functools import wraps
 from datetime import datetime
 from dotenv import load_dotenv
 from src.db import get_mongo, PostgresHelper
@@ -38,6 +40,50 @@ else:
 if FORCE_DRAFTS:
     logger.info("📝 FORCE_DRAFTS is enabled - all emails will be saved as drafts regardless of other settings")
 
+
+def retry_with_backoff(max_retries=3, initial_backoff=1.5):
+    """Retry decorator with exponential backoff for HTTP requests."""
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            backoff = initial_backoff
+            last_exception = None
+            
+            for attempt in range(max_retries):
+                try:
+                    return func(*args, **kwargs)
+                except httpx.RequestError as e:
+                    last_exception = e
+                    # Check if we should retry based on error type
+                    status_code = getattr(e.response, 'status_code', None) if hasattr(e, 'response') else None
+                    
+                    # Don't retry client errors except 429 (rate limit) and 408 (timeout)
+                    if status_code and 400 <= status_code < 500 and status_code not in (429, 408):
+                        logger.warning(f"Client error {status_code}, not retrying: {str(e)}")
+                        raise
+                        
+                    # Only retry on request errors or server errors
+                    logger.warning(f"Request failed (attempt {attempt+1}/{max_retries}): {str(e)}")
+                    
+                    # Check if this is the last attempt
+                    if attempt == max_retries - 1:
+                        logger.error(f"Max retries reached, giving up: {str(e)}")
+                        raise
+                    
+                    # Calculate backoff with jitter
+                    sleep_time = backoff * (1.0 + 0.1 * random.random())
+                    logger.info(f"Retrying in {sleep_time:.2f} seconds...")
+                    time.sleep(sleep_time)
+                    
+                    # Increase backoff for next attempt
+                    backoff *= 2
+            
+            # This should never happen, but just in case
+            if last_exception:
+                raise last_exception
+            return None
+        return wrapper
+    return decorator
 
 class Config:
     """Configuration class for email processing system."""
@@ -240,6 +286,7 @@ class EmailSender:
         logger.error(f"HTTP error during {operation}: {status_code} - {response.text}")
         return False
     
+    @retry_with_backoff(max_retries=3, initial_backoff=1.5)
     def save_as_draft(self, to_address, subject, body, message_id=None, batch_id=None, retry_attempt=0):
         """Save an email as draft instead of sending it."""
         try:
@@ -327,8 +374,8 @@ class EmailSender:
             
             # Handle errors with retry logic
             if self._handle_http_error(response, "draft creation", retry_attempt):
-                # Only increment retry_attempt if token refresh was triggered
-                next_retry = retry_attempt + 1 if response.status_code == 401 else retry_attempt
+                # FIX: Always increment retry_attempt on retry
+                next_retry = retry_attempt + 1
                 if next_retry < self.config.max_retries:
                     logger.info(f"Retrying draft creation after error (attempt {next_retry+1})")
                     return self.save_as_draft(to_address, subject, body, message_id, batch_id, next_retry)
@@ -345,7 +392,8 @@ class EmailSender:
         except Exception as e:
             logger.exception(f"Error saving draft: {str(e)}")
             return None
-    
+
+    @retry_with_backoff(max_retries=3, initial_backoff=1.5)
     def send_email(self, to_address, subject, body, message_id=None, batch_id=None, retry_attempt=0):
         """Send an email directly."""
         # Safety check - never send if mail sending is disabled or force drafts is enabled
@@ -434,8 +482,8 @@ class EmailSender:
             
             # Handle errors with retry logic
             if self._handle_http_error(response, "email sending", retry_attempt):
-                # Only increment retry_attempt if token refresh was triggered
-                next_retry = retry_attempt + 1 if response.status_code == 401 else retry_attempt
+                # FIX: Always increment retry_attempt on retry
+                next_retry = retry_attempt + 1
                 if next_retry < self.config.max_retries:
                     logger.info(f"Retrying email sending after error (attempt {next_retry+1})")
                     return self.send_email(to_address, subject, body, message_id, batch_id, next_retry)
@@ -515,8 +563,9 @@ class EmailProcessor:
             # Skip emails that shouldn't receive responses
             if self.email_validator.should_skip_email(email):
                 logger.info(f"Skipping email {message_id} - should not receive a response")
-                # Still mark as sent for these since we're deliberately skipping
-                self.mongo.mark_email_sent(email.get("message_id"))
+                # Do NOT mark as sent; leave it un-sent so we can see it later during testing
+                # Instead mark it as "draft saved" so dashboards see it as handled
+                self.mongo.mark_email_draft_saved(email.get("message_id"))
                 self.current_batch_stats["emails_skipped"] += 1
                 return True, False  # Success, not a draft
             
@@ -767,22 +816,22 @@ def get_email_sender():
     return EmailSender(config, auth_manager)
 
 
-def save_as_draft(to_address, subject, body, message_id=None, batch_id=None):
+def save_as_draft(to_address, subject, body, message_id=None, batch_id=None, retry_attempt=0):
     """Save an email as draft and update databases."""
     email_sender = get_email_sender()
-    return email_sender.save_as_draft(to_address, subject, body, message_id, batch_id)
+    return email_sender.save_as_draft(to_address, subject, body, message_id, batch_id, retry_attempt)
 
 
-def send_email(to_address, subject, body, message_id=None, batch_id=None):
+def send_email(to_address, subject, body, message_id=None, batch_id=None, retry_attempt=0):
     """Send an email directly and update databases."""
     # Safety check - never send if mail sending is disabled or force drafts is enabled
     if not MAIL_SEND_ENABLED or FORCE_DRAFTS:
         logger.warning(f"⚠️ ATTEMPTED TO SEND EMAIL TO {to_address}, BUT MAIL_SEND_ENABLED={MAIL_SEND_ENABLED} OR FORCE_DRAFTS={FORCE_DRAFTS}")
         logger.info("Saving as draft instead of sending due to environment configuration")
-        return save_as_draft(to_address, subject, body, message_id, batch_id)
+        return save_as_draft(to_address, subject, body, message_id, batch_id, retry_attempt)
     
     email_sender = get_email_sender()
-    return email_sender.send_email(to_address, subject, body, message_id, batch_id)
+    return email_sender.send_email(to_address, subject, body, message_id, batch_id, retry_attempt)
 
 
 def process_draft_emails(batch_id=None):

@@ -11,13 +11,16 @@ It separates the email fetching and classification from the email sending,
 which is now handled by email_sender.py.
 """
 
+
 import os
 import sys
 import time
 import httpx
 import msal
-import re
 import requests
+import random
+import logging
+from functools import wraps
 from datetime import datetime, timedelta
 from urllib.parse import quote, urlencode
 from typing import Dict, Optional, List, Any, Tuple
@@ -88,6 +91,49 @@ RESPONSE_LABELS = [
     "claims_paid_no_proof"
 ]
 
+def retry_with_backoff(max_retries=3, initial_backoff=1.5):
+    """Retry decorator with exponential backoff for HTTP requests."""
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            backoff = initial_backoff
+            last_exception = None
+            
+            for attempt in range(max_retries):
+                try:
+                    return func(*args, **kwargs)
+                except httpx.RequestError as e:
+                    last_exception = e
+                    # Check if we should retry based on error type
+                    status_code = getattr(e.response, 'status_code', None) if hasattr(e, 'response') else None
+                    
+                    # Don't retry client errors except 429 (rate limit) and 408 (timeout)
+                    if status_code and 400 <= status_code < 500 and status_code not in (429, 408):
+                        logger.warning(f"Client error {status_code}, not retrying: {str(e)}")
+                        raise
+                        
+                    # Only retry on request errors or server errors
+                    logger.warning(f"Request failed (attempt {attempt+1}/{max_retries}): {str(e)}")
+                    
+                    # Check if this is the last attempt
+                    if attempt == max_retries - 1:
+                        logger.error(f"Max retries reached, giving up: {str(e)}")
+                        raise
+                    
+                    # Calculate backoff with jitter
+                    sleep_time = backoff * (1.0 + 0.1 * random.random())
+                    logger.info(f"Retrying in {sleep_time:.2f} seconds...")
+                    time.sleep(sleep_time)
+                    
+                    # Increase backoff for next attempt
+                    backoff *= 2
+            
+            # If we got here, raise the last exception (if any)
+            if last_exception:
+                raise last_exception
+            raise RuntimeError("retry_with_backoff gave up but no exception captured")
+        return wrapper
+    return decorator
 
 class ModelAPIClient:
     """Client for model API calls (classification and reply generation)."""
@@ -204,11 +250,10 @@ If you have any further questions, please don't hesitate to contact us.
 Best regards,
 ABC Collections Team"""
 
-
 class MSGraphClient:
     """Microsoft Graph API client for email operations."""
     
-    def __init__(self):
+    def __init__(self, batch_size=BATCH_SIZE):
         """Initialize with credentials from environment."""
         self.base_url = MS_GRAPH_BASE_URL
         self.client_id = CLIENT_ID
@@ -216,6 +261,7 @@ class MSGraphClient:
         self.tenant_id = TENANT_ID
         self.email_address = EMAIL_ADDRESS
         self._token_cache = {"token": None, "expires_at": 0}
+        self.batch_size = batch_size
         
     def get_access_token(self, force_refresh=False):
         """Get a valid access token, refreshing if needed."""
@@ -265,7 +311,7 @@ class MSGraphClient:
             logger.exception(f"Error getting access token: {str(e)}")
             raise
     
-    def get_all_pages(self, url, params=None):
+    def get_all_pages(self, url, params=None, max_items=None):
         """Yield every item in a Graph collection, following @odata.nextLink."""
         # Add params to initial URL if provided
         if params:
@@ -283,7 +329,7 @@ class MSGraphClient:
             
         # Track number of items yielded for batch size limiting
         count = 0
-        max_items = BATCH_SIZE
+        max_items = max_items or self.batch_size  # Use instance batch_size if none provided
             
         while full_url:
             try:
@@ -311,11 +357,15 @@ class MSGraphClient:
                 logger.error(f"Error during pagination: {str(e)}")
                 break
     
-    def fetch_unread_emails(self, hours_filter=TIME_FILTER_HOURS, max_emails=BATCH_SIZE) -> List[Dict]:
+    @retry_with_backoff(max_retries=3, initial_backoff=1.5)
+    def fetch_unread_emails(self, hours_filter=TIME_FILTER_HOURS, max_emails=None) -> List[Dict]:
         """Fetch unread emails from inbox with filtering by time."""
         # Get unread emails with filtering by time
         time_threshold = datetime.utcnow() - timedelta(hours=hours_filter)
         time_threshold_str = time_threshold.strftime('%Y-%m-%dT%H:%M:%SZ')
+        
+        # Use instance batch_size if none provided
+        max_emails = max_emails or self.batch_size
         
         # Parameters for filtering unread emails
         params = {
@@ -348,7 +398,7 @@ class MSGraphClient:
             logger.info(f"Total unread emails in inbox: {total_unread}")
             
             # Collect emails to process
-            emails = list(self.get_all_pages(url=url, params=params))
+            emails = list(self.get_all_pages(url=url, params=params, max_items=max_emails))
             
             if not emails:
                 logger.info("No unread emails to process.")
@@ -367,6 +417,8 @@ class MSGraphClient:
             logger.error(f"Error fetching unread emails: {str(e)}")
             return []
     
+    # In the MSGraphClient class, replace the existing move_email_to_folder method with this:
+    @retry_with_backoff(max_retries=3, initial_backoff=1.5)
     def move_email_to_folder(self, message_id, folder_id):
         """Move an email to a specific folder in Outlook."""
         access_token = self.get_access_token()
@@ -392,6 +444,7 @@ class MSGraphClient:
             logger.warning(f"Unexpected error moving email {message_id} to folder {folder_id}: {str(e)}")
             return False, None
     
+    @retry_with_backoff(max_retries=3, initial_backoff=1.5)
     def mark_email_read_status(self, message_id, is_read=True):
         """Mark an email as read or unread."""
         access_token = self.get_access_token()
@@ -548,182 +601,175 @@ class EmailProcessor:
                 logger.warning(f"Invalid BATCH_SIZE in environment. Using default: {self.batch_size}")
     
     def _process_single_email(self, msg):
-        """Process a single email message - classify, store, and move to folder."""
-        message_id = msg.get('id', 'unknown_id')
+        """Process a single email message – classify, store, and move to folder."""
+        message_id = msg.get("id", "unknown_id")
         
         try:
-            # Extract email metadata
+            # ── 1 ▸ extract basic metadata ──────────────────────────────────────
             sender_info = msg.get("from", {}).get("emailAddress", {})
-            sender = sender_info.get("address", "")
-            subject = msg.get("subject", "")
+            sender       = sender_info.get("address", "")
+            subject      = msg.get("subject", "")
             body_preview = msg.get("bodyPreview", "")
-            received = msg.get("receivedDateTime", "")
-            
-            # Extract recipient information (if available)
+            received     = msg.get("receivedDateTime", "")
+
+            # first (primary) recipient if present
             recipient = ""
             to_recipients = msg.get("toRecipients", [])
-            if to_recipients and len(to_recipients) > 0:
+            if to_recipients:
                 recipient_info = to_recipients[0].get("emailAddress", {})
                 recipient = recipient_info.get("address", "")
-            
-            logger.info(f"Processing email: {message_id} | From: {sender} | Subject: {subject}")
-            
-            # Skip if already processed
+
+            logger.info("Processing email %s | From: %s | Subject: %s",
+                        message_id, sender, subject)
+
+            # ── 2 ▸ skip duplicates ─────────────────────────────────────────────────
             if self.mongo.email_exists(message_id):
-                logger.info(f"Skipping already processed email: {message_id}")
+                logger.info("Skipping already-processed email: %s", message_id)
                 self.metrics["emails_skipped"] += 1
                 return
-            
-            # Classify email using the API
+
+            # ── 3 ▸ classify with model API ─────────────────────────────────────
             try:
-                # Call the classification API
-                classification_result = self.model_api.classify_email(subject=subject, body=body_preview)
-                label = classification_result.get("label", "manual_review")
-                confidence = classification_result.get("confidence", 0.0)
-                
-                # Make sure we only use allowed labels
+                classification_result = self.model_api.classify_email(
+                    subject=subject, body=body_preview
+                )
+                label       = classification_result.get("label", "manual_review")
+                confidence  = classification_result.get("confidence", 0.0)
+
                 if label not in ALLOWED_LABELS:
-                    logger.warning(f"Classifier returned non-allowed label '{label}', using 'manual_review' instead")
+                    logger.warning("Classifier returned non-allowed label '%s'; using 'manual_review'", label)
                     label = "manual_review"
-                
-                logger.info(f"Email {message_id} classified as '{label}' with confidence {confidence:.2f}")
+
+                logger.info("Email %s classified as '%s' (%.2f)",
+                            message_id, label, confidence)
                 self.metrics["emails_classified"] += 1
-                
-            except Exception as e:
-                logger.exception(f"Error during classification for email {message_id}. Using manual_review:")
-                label = "manual_review"
-                confidence = 0.0
+
+            except Exception:
+                logger.exception("Error during classification for email %s; defaulting to manual_review",
+                                message_id)
+                label       = "manual_review"
+                confidence  = 0.0
                 classification_result = {"label": label, "confidence": confidence, "method": "api_error"}
-            
-            # Extract entities for response generation
+
             entities = classification_result.get("entities", {})
-            
-            # Generate response if needed - only for labels in RESPONSE_LABELS
+
+            # ── 4 ▸ generate a reply if needed ──────────────────────────────────
             reply_text = ""
-            
             try:
                 if label in RESPONSE_LABELS:
-                    logger.info(f"Generating response for {message_id} with label: {label}")
-                    
-                    # Call the reply generation API
+                    logger.info("Generating response for %s with label '%s'", message_id, label)
                     reply_text = self.model_api.generate_reply(
                         subject=subject,
                         body=body_preview,
                         label=label,
-                        entities=entities
+                        entities=entities,
                     )
-                    
                     if not reply_text:
-                        logger.warning(f"Empty reply generated for email {message_id}")
-                
-            except Exception as e:
-                logger.exception(f"Error generating response for email {message_id}:")
-                label = "manual_review"
+                        logger.warning("Empty reply generated for email %s", message_id)
+            except Exception:
+                logger.exception("Error generating response for email %s", message_id)
+                label      = "manual_review"
                 reply_text = ""
-            
-            # Determine if this needs manual review based on label
+
+            # ── 5 ▸ flags for drafts / manual review ────────────────────────────
             needs_manual_review = label not in RESPONSE_LABELS
-            
-            # Default save_as_draft value based on classification
             save_as_draft = needs_manual_review
-            
-            # Force draft mode if MAIL_SEND_ENABLED is False or FORCE_DRAFTS is True
             if not MAIL_SEND_ENABLED or FORCE_DRAFTS:
                 save_as_draft = True
-                logger.info(f"Forcing email {message_id} to be saved as draft due to configuration")
-            
-            # Set the current batch_id for the MongoDB connection
-            self.mongo.set_batch_id(self.batch_id)
-            
-            # Add batch_id to email data for tracking
+                logger.info("Forcing email %s to draft due to configuration", message_id)
+
+            # ── 6 ▸ assemble document for Mongo ─────────────────────────────────
+            self.mongo.set_batch_id(self.batch_id)          # associate batch
+
             email_data = {
-                "message_id": message_id,
-                "sender": sender,
-                "recipient": recipient,  # Added recipient field here
-                "to": recipient,         # Also add as "to" for backward compatibility
-                "subject": subject,
-                "body": body_preview,
-                "text": body_preview,
-                "received_at": received,
-                "classification": label,
-                "prediction": label,
-                "confidence": confidence,
-                "method": classification_result.get("method", ""),
-                "response": reply_text,
-                "response_sent": False if reply_text else None,  # Always start as not sent
-                "processed_at": datetime.utcnow().isoformat(),
-                "batch_id": self.batch_id,
-                "response_process": False,
-                "save_as_draft": save_as_draft,  # Use the corrected value
-                "draft_saved": False,  # Initialize as not saved
-                "target_folder": label,
-                # Store entities directly at top level for easier access by extract_contact_info
-                "entities": entities,
-                # Also store properly in metadata structure for compatibility
+                "message_id":        message_id,
+                "sender":            sender,
+                "recipient":         recipient,
+                "to":                recipient,             # back-compat
+                "subject":           subject,
+                "body":              body_preview,
+                "text":              body_preview,
+                "received_at":       received,
+                "classification":    label,
+                "prediction":        label,
+                "confidence":        confidence,
+                "method":            classification_result.get("method", ""),
+                "response":          reply_text,
+                "response_sent":     False if reply_text else None,
+                "processed_at":      datetime.utcnow().isoformat(),
+                "batch_id":          self.batch_id,
+                "response_process":  False,
+                "save_as_draft":     save_as_draft,
+                "draft_saved":       False,
+                "target_folder":     label,
+                "entities":          entities,
                 "metadata": {
-                    "entities": entities,
-                    "sentiment": classification_result.get("sentiment", {}),
-                    "confidence_score": confidence,
+                    "entities":              entities,
+                    "sentiment":             classification_result.get("sentiment", {}),
+                    "confidence_score":      confidence,
                     "classification_method": classification_result.get("method", ""),
-                    "matching_patterns": classification_result.get("matching_patterns", [])
-                }
+                    "matching_patterns":     classification_result.get("matching_patterns", []),
+                },
             }
-            
-            # Copy OOO and left company data if available
+
+            # ▸ copy OOO / left-company info if present
             if "ooo_person" in entities:
-                email_data["ooo_person"] = entities.get("ooo_person", {})
+                email_data["ooo_person"]         = entities.get("ooo_person", {})
                 email_data["ooo_contact_person"] = entities.get("ooo_contact_person", {})
-                email_data["ooo_dates"] = entities.get("ooo_dates", {})
-                
-                # Also put in metadata
+                email_data["ooo_dates"]          = entities.get("ooo_dates", {})
                 email_data["metadata"]["out_of_office"] = {
-                    "ooo_person": entities.get("ooo_person", {}),
-                    "contact_person": entities.get("ooo_contact_person", {}),
-                    "ooo_dates": entities.get("ooo_dates", {})
+                    "ooo_person":     email_data["ooo_person"],
+                    "contact_person": email_data["ooo_contact_person"],
+                    "ooo_dates":      email_data["ooo_dates"],
                 }
-            
+
             if "left_person" in entities:
-                email_data["left_person"] = entities.get("left_person", {})
+                email_data["left_person"]        = entities.get("left_person", {})
                 email_data["replacement_contact"] = entities.get("replacement_contact", {})
-                
-                # Also put in metadata
                 email_data["metadata"]["left_company"] = {
-                    "left_person": entities.get("left_person", {}),
-                    "replacement": entities.get("replacement_contact", {})
+                    "left_person": email_data["left_person"],
+                    "replacement": email_data["replacement_contact"],
                 }
-            
-            # Insert into MongoDB
+
+            # ── 7 ▸ insert in Mongo ─────────────────────────────────────────────
             result = self.mongo.insert_email(email_data)
-            logger.info(f"Email {message_id} inserted into MongoDB")
-            
-            # Mark as read/unread based on classification
-            is_read = label not in ["manual_review"]
-            mark_success = self.graph_client.mark_email_read_status(message_id, is_read)
-            if mark_success:
-                logger.info(f"Email {message_id} marked as {'read' if is_read else 'unread'}")
-            else:
-                logger.warning(f"Failed to mark email {message_id} as {'read' if is_read else 'unread'}")
-            
-            # Move to appropriate folder
+            if result and hasattr(result, 'inserted_id'):
+                self.mongo.last_inserted_id = result.inserted_id
+            logger.info("Email %s inserted into MongoDB", message_id)
+
+            # ── 8 ▸ move to folder first ──────────────────────────────────────── (swapped order)
             folder_id = self.folder_mapping.get(label)
+            logger.debug("Folder mapping for '%s' → %s", label, folder_id)
+            
+            old_id = message_id  # Store original ID before move
+            
             if folder_id:
-                move_success, new_id = self.graph_client.move_email_to_folder(message_id, folder_id)
-                if move_success:
-                    logger.info(f"Email {message_id} successfully moved to folder for label '{label}'")
+                move_success, new_id = self.graph_client.move_email_to_folder(
+                    message_id, folder_id
+                )
+                if move_success and new_id:
+                    logger.info("Email %s moved to folder for label '%s'", message_id, label)
+                    self.mongo.update_message_id(old_id, new_id)
+                    message_id = new_id  # Update message_id with the new ID
                     self.metrics["emails_moved"] += 1
                 else:
-                    logger.warning(f"Failed to move email {message_id} to folder for label '{label}'")
+                    logger.warning("Move failed for email %s (label '%s')", message_id, label)
             else:
-                # Log when folder mapping is missing
-                logger.warning(f"No folder mapping found for label '{label}', email {message_id} will remain in inbox")
-                # Print all available folder mappings for debugging
-                logger.debug(f"Available folder mappings: {self.folder_mapping}")
-            
+                logger.warning("No folder mapping for label '%s'; email %s left in Inbox",
+                            label, message_id)
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug("Available folder-mapping keys: %s", list(self.folder_mapping))
+
+            # ── 9 ▸ then mark read/unread in Outlook ─────────────────────────── (swapped order)
+            is_read = label not in ["manual_review"]
+            self.graph_client.mark_email_read_status(message_id, is_read)  # Using the new ID if moved
+
             self.metrics["emails_processed"] += 1
-            
-        except Exception as e:
-            logger.exception(f"Error processing email {message_id}:")
+
+        except Exception:
+            logger.exception("Unhandled error processing email %s", message_id)
             self.metrics["emails_errored"] += 1
+
     
     def _sync_with_databases(self):
         """Synchronize processed emails with PostgreSQL and finalize batch."""
@@ -859,6 +905,12 @@ def main():
             logger.info("Email sending/draft creation phase complete")
         except Exception as e:
             logger.error(f"Error in email sending/draft creation phase: {str(e)}")
+    
+    # Clean up resources
+    try:
+        processor.mongo.close()
+    except Exception:
+        pass
     
     if success:
         logger.info(f"fetch_reply.py execution completed successfully")
