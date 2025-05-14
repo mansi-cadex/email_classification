@@ -95,8 +95,8 @@ def main():
     logger.info(f"- MAIL_SEND_ENABLED: {os.getenv('MAIL_SEND_ENABLED', 'False')}")
     logger.info(f"- FORCE_DRAFTS: {os.getenv('FORCE_DRAFTS', 'False')}")
     logger.info(f"- SFTP_ENABLED: {os.getenv('SFTP_ENABLED', 'False')}")
-    logger.info(f"- BATCH_SIZE: {os.getenv('BATCH_SIZE', '125')}")
-    logger.info(f"- BATCH_INTERVAL: {os.getenv('BATCH_INTERVAL', '600')} seconds")
+    logger.info(f"- BATCH_SIZE: {os.getenv('BATCH_SIZE')}")
+    logger.info(f"- BATCH_INTERVAL: {300} seconds")
     
     try:
         # Clean up existing failed batches
@@ -113,7 +113,7 @@ def main():
             
             # Instead of using run_email_processor() which might not properly check for shutdown,
             # implement the main loop here with proper shutdown checking
-            batch_interval = int(os.getenv("BATCH_INTERVAL", "600"))
+            batch_interval = 300
             
             while not shutdown_requested:
                 # Process a batch

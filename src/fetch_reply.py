@@ -49,8 +49,8 @@ CLIENT_SECRET = os.getenv("CLIENT_SECRET")
 TENANT_ID = os.getenv("TENANT_ID")
 EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS")
 YOUR_DOMAIN = os.getenv("YOUR_DOMAIN", "abc-amega.com")
-TIME_FILTER_HOURS = int(os.getenv("TIME_FILTER_HOURS", "24"))
-BATCH_SIZE = int(os.getenv("BATCH_SIZE", "20"))
+TIME_FILTER_HOURS = 24
+BATCH_SIZE = 10
 
 # Email sending flags - these will be passed to email_sender but not used directly here
 MAIL_SEND_ENABLED = os.getenv("MAIL_SEND_ENABLED", "False").lower() in ["true", "yes", "1"]
@@ -72,7 +72,7 @@ if MAIL_SEND_ENABLED and FORCE_DRAFTS:
     logger.warning("If you want to actually send emails, set FORCE_DRAFTS=False")
 
 # API configuration for the model server
-MODEL_API_URL = os.getenv("MODEL_API_URL", "http://localhost:8000")
+MODEL_API_URL = "http://localhost:8000"
 
 # Final list of allowed labels
 ALLOWED_LABELS = [
@@ -145,11 +145,11 @@ class ModelAPIClient:
     def health_check(self) -> bool:
         """Check if API is available."""
         try:
-            response = requests.get(f"{self.base_url}/health", timeout=2)
+            response = requests.get(f"{self.base_url}", timeout=2)
             return response.status_code == 200
         except requests.exceptions.RequestException:
             return False
-    
+
     def classify_email(self, subject: str, body: str) -> Dict:
         """Classify an email."""
         try:
@@ -159,7 +159,7 @@ class ModelAPIClient:
                 return {"label": "manual_review", "confidence": 0.0, "method": "fallback"}
             
             response = requests.post(
-                f"{self.base_url}/api/classify",
+                f"{self.base_url}/api/classify",  # Keep the /api/ prefix
                 json={"subject": subject, "body": body},
                 timeout=30
             )
@@ -177,7 +177,7 @@ class ModelAPIClient:
         except Exception as e:
             logger.error(f"Error calling classification API: {e}")
             return {"label": "manual_review", "confidence": 0.0, "method": "api_error"}
-    
+
     def generate_reply(self, subject: str, body: str, label: str, entities: Optional[Dict] = None) -> str:
         """Generate a reply for an email."""
         try:
@@ -187,7 +187,7 @@ class ModelAPIClient:
                 return self._generate_fallback_reply(label)
                 
             response = requests.post(
-                f"{self.base_url}/api/generate_reply",
+                f"{self.base_url}/api/generate_reply",  # Keep the /api/ prefix
                 json={
                     "subject": subject,
                     "body": body,

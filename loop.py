@@ -41,13 +41,13 @@ from src.log_config import logger
 load_dotenv()
 
 # Configuration
-BATCH_SIZE = int(os.getenv("BATCH_SIZE", "125"))
-BATCH_INTERVAL = int(os.getenv("BATCH_INTERVAL", "600"))
-MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
-RETRY_DELAY = int(os.getenv("RETRY_DELAY", "60"))
-BATCH_TIMEOUT = int(os.getenv("BATCH_TIMEOUT", "900"))
-MAIL_SEND_ENABLED = os.getenv("MAIL_SEND_ENABLED", "False").lower() in ["true", "yes", "1"]
-FORCE_DRAFTS = os.getenv("FORCE_DRAFTS", "False").lower() in ["true", "yes", "1"]
+BATCH_SIZE = 10
+BATCH_INTERVAL = 300
+MAX_RETRIES = int(os.getenv("MAX_RETRIES"))
+RETRY_DELAY = int(os.getenv("RETRY_DELAY"))
+BATCH_TIMEOUT = int(os.getenv("BATCH_TIMEOUT"))
+MAIL_SEND_ENABLED = os.getenv("MAIL_SEND_ENABLED")
+FORCE_DRAFTS = os.getenv("FORCE_DRAFTS")
 
 # SFTP Configuration
 SFTP_HOST = os.getenv("SFTP_HOST")
@@ -59,10 +59,7 @@ SFTP_ENABLED = os.getenv("SFTP_ENABLED", "False").lower() in ["true", "yes", "1"
 # Labels that should receive responses
 RESPONSE_LABELS = ["invoice_request_no_info", "claims_paid_no_proof"]
 
-
-# ==========================
 # Helper Functions
-# ==========================
 def send_email_with_retries(to_address: str, subject: str, body: str, message_id: str = None, 
                            batch_id: str = None, retries: int = 3, delay: int = 30) -> bool:
     """Send an email with automatic retries on failure.
