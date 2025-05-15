@@ -50,7 +50,7 @@ TENANT_ID = os.getenv("TENANT_ID")
 EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS")
 YOUR_DOMAIN = os.getenv("YOUR_DOMAIN", "abc-amega.com")
 TIME_FILTER_HOURS = 24
-BATCH_SIZE = 10
+BATCH_SIZE = 125
 
 # Email sending flags - these will be passed to email_sender but not used directly here
 MAIL_SEND_ENABLED = os.getenv("MAIL_SEND_ENABLED", "False").lower() in ["true", "yes", "1"]
@@ -72,7 +72,7 @@ if MAIL_SEND_ENABLED and FORCE_DRAFTS:
     logger.warning("If you want to actually send emails, set FORCE_DRAFTS=False")
 
 # API configuration for the model server
-MODEL_API_URL = "http://localhost:8000"
+MODEL_API_URL = "http://0.0.0.0:8080"
 
 # Final list of allowed labels
 ALLOWED_LABELS = [
@@ -358,19 +358,15 @@ class MSGraphClient:
                 break
     
     @retry_with_backoff(max_retries=3, initial_backoff=1.5)
-    def fetch_unread_emails(self, hours_filter=TIME_FILTER_HOURS, max_emails=None) -> List[Dict]:
-        """Fetch unread emails from inbox with filtering by time."""
-        # Get unread emails with filtering by time
-        time_threshold = datetime.utcnow() - timedelta(hours=hours_filter)
-        time_threshold_str = time_threshold.strftime('%Y-%m-%dT%H:%M:%SZ')
-        
+    def fetch_unread_emails(self, max_emails=None) -> List[Dict]:
+        """Fetch all unread emails from inbox without time filtering."""
         # Use instance batch_size if none provided
         max_emails = max_emails or self.batch_size
         
-        # Parameters for filtering unread emails
+        # Parameters for filtering unread emails - removed time filter
         params = {
             "$orderby": "receivedDateTime desc",
-            "$filter": f"isRead eq false and isDraft eq false and receivedDateTime ge {time_threshold_str}",
+            "$filter": "isRead eq false and isDraft eq false",
             "$select": "id,subject,from,bodyPreview,receivedDateTime,hasAttachments,toRecipients",
             "$top": max_emails
         }
