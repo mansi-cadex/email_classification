@@ -41,13 +41,16 @@ from src.log_config import logger
 load_dotenv()
 
 # Configuration
-BATCH_SIZE = 10
+BATCH_SIZE = 5
 BATCH_INTERVAL = 300
+
+#BATCH_SIZE = int(os.getenv("BATCH_SIZE", "125"))
+#BATCH_INTERVAL = int(os.getenv("BATCH_INTERVAL", "900"))
 MAX_RETRIES = int(os.getenv("MAX_RETRIES"))
 RETRY_DELAY = int(os.getenv("RETRY_DELAY"))
 BATCH_TIMEOUT = int(os.getenv("BATCH_TIMEOUT"))
-MAIL_SEND_ENABLED = os.getenv("MAIL_SEND_ENABLED")
-FORCE_DRAFTS = os.getenv("FORCE_DRAFTS")
+MAIL_SEND_ENABLED = os.getenv("False")
+FORCE_DRAFTS = os.getenv("FORCE_DRAFTS","True")
 
 # SFTP Configuration
 SFTP_HOST = os.getenv("SFTP_HOST")
@@ -361,10 +364,6 @@ def upload_to_sftp(filename: str, file_content: Optional[bytes] = None,
     logger.error(f"Failed to upload {filename} to SFTP after {max_retries} attempts")
     return False
 
-
-# ==========================
-# Data Extraction Functions
-# ==========================
 def extract_contact_info(email_doc: Dict) -> Dict:
     """Extract contact information from email document metadata.
     
@@ -378,7 +377,8 @@ def extract_contact_info(email_doc: Dict) -> Dict:
         "new_contact_email": "", 
         "new_contact_name": "", 
         "new_contact_phone": "",
-        "contact_status": "active"  # Default status
+        "contact_status": "active",  # Default status
+        "has_updated_info": False    # Track if any contact info was updated
     }
     
     # First try to get entities directly from the stored API response
@@ -399,16 +399,19 @@ def extract_contact_info(email_doc: Dict) -> Dict:
         emails = entities.get("emails", [])
         if emails and isinstance(emails, list) and len(emails) > 0:
             contact_info["new_contact_email"] = emails[0]
+            contact_info["has_updated_info"] = True
         
         # Extract phones
         phones = entities.get("phones", [])
         if phones and isinstance(phones, list) and len(phones) > 0:
             contact_info["new_contact_phone"] = phones[0]
+            contact_info["has_updated_info"] = True
         
         # Extract people
         people = entities.get("people", [])
         if people and isinstance(people, list) and len(people) > 0:
             contact_info["new_contact_name"] = people[0]
+            contact_info["has_updated_info"] = True
     
     # Check metadata for special cases
     meta = email_doc.get("metadata", {})
@@ -424,12 +427,15 @@ def extract_contact_info(email_doc: Dict) -> Dict:
             # Email
             if replacement.get("email") and not contact_info["new_contact_email"]:
                 contact_info["new_contact_email"] = replacement.get("email", "")
+                contact_info["has_updated_info"] = True
             # Phone
             if replacement.get("phone") and not contact_info["new_contact_phone"]:
                 contact_info["new_contact_phone"] = replacement.get("phone", "")
+                contact_info["has_updated_info"] = True
             # Name
             if replacement.get("name") and not contact_info["new_contact_name"]:
                 contact_info["new_contact_name"] = replacement.get("name", "")
+                contact_info["has_updated_info"] = True
 
     # Check for temporary absence (out of office info)
     ooo = meta.get("out_of_office", {})
@@ -443,12 +449,15 @@ def extract_contact_info(email_doc: Dict) -> Dict:
             # Email
             if contact_person.get("email") and not contact_info["new_contact_email"]:
                 contact_info["new_contact_email"] = contact_person.get("email", "")
+                contact_info["has_updated_info"] = True
             # Phone
             if contact_person.get("phone") and not contact_info["new_contact_phone"]:
                 contact_info["new_contact_phone"] = contact_person.get("phone", "")
+                contact_info["has_updated_info"] = True
             # Name
             if contact_person.get("name") and not contact_info["new_contact_name"]:
                 contact_info["new_contact_name"] = contact_person.get("name", "")
+                contact_info["has_updated_info"] = True
     
     # Direct access to ooo_contact_person if available
     ooo_contact = email_doc.get("ooo_contact_person", {})
@@ -459,18 +468,44 @@ def extract_contact_info(email_doc: Dict) -> Dict:
             
         if ooo_contact.get("email") and not contact_info["new_contact_email"]:
             contact_info["new_contact_email"] = ooo_contact.get("email", "")
+            contact_info["has_updated_info"] = True
         if ooo_contact.get("phone") and not contact_info["new_contact_phone"]:
             contact_info["new_contact_phone"] = ooo_contact.get("phone", "")
+            contact_info["has_updated_info"] = True
         if ooo_contact.get("name") and not contact_info["new_contact_name"]:
             contact_info["new_contact_name"] = ooo_contact.get("name", "")
+            contact_info["has_updated_info"] = True
     
     # Check for direct left_person fields
     left_person = email_doc.get("left_person", {})
     if left_person:
         contact_info["contact_status"] = "permanent_departure"
     
+    # Check combined text for OOO or left company patterns
+    combined_text = f"{email_doc.get('subject', '')} {email_doc.get('text', '')}".lower()
+    
+    if ("out of office" in combined_text or 
+        "on leave" in combined_text or 
+        "on vacation" in combined_text or 
+        "away from office" in combined_text or 
+        "will be away" in combined_text or
+        "automatic reply" in combined_text):
+        if contact_info["contact_status"] == "active":
+            contact_info["contact_status"] = "temporary_absence"
+    
+    if ("left the company" in combined_text or 
+        "no longer works" in combined_text or 
+        "resigned" in combined_text or 
+        "no longer with" in combined_text):
+        contact_info["contact_status"] = "permanent_departure"
+    
+    # Special handling for service accounts
+    sender = email_doc.get("sender", "").lower()
+    if sender and any(domain in sender for domain in ["service-now.com", "noreply", "no-reply", "donotreply", "system@", "notification@"]):
+        # Service accounts should always remain active
+        contact_info["contact_status"] = "service_account"
+        
     return contact_info
-
 
 def build_reply_summary(email_doc: Dict, contact_info: Dict) -> str:
     """Return a short status string for the ReplyText column.
@@ -484,17 +519,34 @@ def build_reply_summary(email_doc: Dict, contact_info: Dict) -> str:
     """
     label = email_doc.get("prediction") or email_doc.get("classification") or ""
     contact_status = contact_info.get("contact_status", "active")
+    has_updated_info = contact_info.get("has_updated_info", False)
     
-    # 1-4: purely informational – no update
+    # Check for payment indicators in no-reply classifications
+    combined_text = f"{email_doc.get('subject', '')} {email_doc.get('text', '')}".lower()
+    payment_indicators = ["payment", "paid", "paying", "transferred", "settled", "transaction", "confirmation"]
+    
+    has_payment_terms = any(indicator in combined_text for indicator in payment_indicators)
+    
+    # Check for service account
+    sender = email_doc.get("sender", "").lower()
+    is_service_account = sender and any(domain in sender for domain in ["service-now.com", "noreply", "no-reply", "donotreply", "system@", "notification@"])
+    
+    # Flag potential payment in no_reply emails
+    if has_payment_terms and label in ["no_reply_no_info", "no_reply_with_info"] and not is_service_account:
+        return "⚠️ payment info detected - review needed"
+    
+    # 1-4: purely informational – update contact info or leave as is
     if label in [
         "no_reply_no_info", "auto_reply_no_info",
         "no_reply_with_info", "auto_reply_with_info"
     ]:
-        # Include contact status in response if relevant
+        # Include contact status in response
         if contact_status == "permanent_departure":
             prefix = "contact left company - "
         elif contact_status == "temporary_absence":
             prefix = "contact temporarily away - "
+        elif contact_status == "service_account":
+            return "service account - no action"
         else:
             prefix = ""
             
@@ -516,11 +568,16 @@ def build_reply_summary(email_doc: Dict, contact_info: Dict) -> str:
     
     # Manual review case
     if label == "manual_review":
-        return "manual review – flagged by model"
+        # Enhance manual review with potential reason
+        if has_payment_terms:
+            return "manual review – payment information"
+        elif is_service_account:
+            return "manual review – service account"
+        else:
+            return "manual review – flagged by model"
     
     # Default for any other non-response case
     return "no_response"
-
 
 def extract_invoice_info(email_doc: Dict) -> Dict:
     """Extract invoice and payment information from email document.
@@ -572,19 +629,8 @@ def extract_invoice_info(email_doc: Dict) -> Dict:
     
     return invoice_info
 
-
-# ==========================
-# Report Generation
-# ==========================
 def export_processed_emails_to_excel(batch_id: str) -> Optional[str]:
-    """Export processed emails to Excel and upload to SFTP.
-    
-    Args:
-        batch_id: Batch ID to export
-        
-    Returns:
-        str: Filename if successful, None otherwise
-    """
+    """Export processed emails to Excel and upload to SFTP."""
     if not batch_id:
         logger.warning("Cannot export to Excel: No batch_id provided")
         return None
@@ -610,30 +656,41 @@ def export_processed_emails_to_excel(batch_id: str) -> Optional[str]:
             # Extract contact information
             contact_info = extract_contact_info(e)
             
-            # Determine reply status
-            if e.get("response_sent"):
-                reply_sent = "sent"
-            elif e.get("draft_saved"):
-                reply_sent = "draft"
-            elif e.get("prediction") in RESPONSE_LABELS:
-                # Should have a reply, but it failed somewhere
-                reply_sent = "reply_missing"
+            # Only emails with certain labels should get response statuses
+            needs_response = e.get("prediction") in RESPONSE_LABELS
+            
+            if needs_response:
+                if e.get("response_sent") is True:
+                    reply_sent = "sent"
+                elif e.get("draft_saved") is True:
+                    reply_sent = "draft"
+                elif e.get("response"):
+                    reply_sent = "pending"
+                else:
+                    reply_sent = "reply_missing"
             else:
                 reply_sent = "no_response"
             
-            # Get short reply summary
-            short_reply = build_reply_summary(e, contact_info)
+            # Determine target folder
+            target_folder = e.get("target_folder", "") or e.get("prediction", "")
             
-            # Create row with all information
+            # Get clean email body - THIS IS THE KEY CHANGE
+            email_body = e.get("body", "") or e.get("text", "")
+            
+            # Truncate if too long for Excel
+            if len(email_body) > 32767:
+                email_body = email_body[:32764] + "..."
+            
+            # Create row - BODY REPLACES ReplyText
             row = {
                 "EmailFrom": e.get("sender", ""),
                 "EmailTo": e.get("recipient", e.get("to", "")),
                 "SubjectLine": e.get("subject", ""),
                 "Date": e.get("received_at", e.get("date", "")),
-                "Event Type": e.get("classification", e.get("prediction", e.get("event_type", ""))),
-                "TargetFolder": e.get("target_folder", "") or e.get("classification", e.get("prediction", "")),
+                "Event Type": e.get("prediction", e.get("classification", "")),
+                "TargetFolder": target_folder,
                 "ReplySent": reply_sent,
-                "ReplyText": short_reply,
+                "Body": email_body,  # CHANGED: ReplyText -> Body
                 "NewContactEmail": contact_info.get("new_contact_email", ""),
                 "NewContactPhone": contact_info.get("new_contact_phone", ""),
                 "ContactStatus": contact_info.get("contact_status", "active")
@@ -643,10 +700,10 @@ def export_processed_emails_to_excel(batch_id: str) -> Optional[str]:
 
         df = pd.DataFrame(rows)
         
-        # Define all possible columns to ensure consistent output
+        # Column order - UPDATED: ReplyText -> Body
         cols = [
             "EmailFrom", "EmailTo", "SubjectLine", "Date",
-            "Event Type", "TargetFolder", "ReplySent", "ReplyText", 
+            "Event Type", "TargetFolder", "ReplySent", "Body",
             "NewContactEmail", "NewContactPhone", "ContactStatus"
         ]
         
@@ -654,10 +711,9 @@ def export_processed_emails_to_excel(batch_id: str) -> Optional[str]:
             if col not in df.columns:
                 df[col] = ""
         
-        # Ensure columns are in the right order
         df = df[cols]
         
-        # Generate timestamp and filename with both timestamp and batch_id for uniqueness
+        # Generate filename
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         batch_suffix = batch_id[-8:] if batch_id else uuid.uuid4().hex[:8]
         fname = f"AI_Agent_Data_Load_{ts}_{batch_suffix}.xlsx"
@@ -675,10 +731,6 @@ def export_processed_emails_to_excel(batch_id: str) -> Optional[str]:
         logger.error(f"Error exporting to Excel: {str(e)}")
         return None
 
-
-# ==========================
-# Batch Management Functions
-# ==========================
 def mark_permanently_failed(batch_id: str, reason: str) -> bool:
     """Mark a batch as permanently failed in both MongoDB and PostgreSQL.
     
@@ -1114,10 +1166,6 @@ def run_email_processor():
             # Wait a bit to avoid tight loop in case of persistent errors
             time.sleep(60)
 
-
-# ==========================
-# Entry Point
-# ==========================
 if __name__ == "__main__":
     try:
         run_email_processor()

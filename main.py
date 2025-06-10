@@ -60,6 +60,18 @@ def setup_logging():
     logger.info(f"Logging initialized at {log_level} level")
 
 
+def get_env_int(key: str, default: int) -> int:
+    """Safely get integer from environment variable."""
+    value = os.getenv(key, str(default))
+    # Remove any comments and whitespace
+    value = value.split('#')[0].strip()
+    try:
+        return int(value)
+    except ValueError:
+        logger.warning(f"Invalid value for {key}: '{value}'. Using default: {default}")
+        return default
+
+
 def main():
     """Main entry point for the email processing application"""
     # Set flag to track if shutdown is requested
@@ -95,8 +107,8 @@ def main():
     logger.info(f"- MAIL_SEND_ENABLED: {os.getenv('MAIL_SEND_ENABLED', 'False')}")
     logger.info(f"- FORCE_DRAFTS: {os.getenv('FORCE_DRAFTS', 'False')}")
     logger.info(f"- SFTP_ENABLED: {os.getenv('SFTP_ENABLED', 'False')}")
-    logger.info(f"- BATCH_SIZE: {os.getenv('BATCH_SIZE')}")
-    logger.info(f"- BATCH_INTERVAL: {600} seconds")
+    logger.info(f"- BATCH_SIZE: {get_env_int('BATCH_SIZE', 5)}")
+    logger.info(f"- BATCH_INTERVAL: {get_env_int('BATCH_INTERVAL', 300)} seconds")
     
     try:
         # Clean up existing failed batches
@@ -111,9 +123,8 @@ def main():
         if not shutdown_requested:
             logger.info("Starting main email processing loop")
             
-            # Instead of using run_email_processor() which might not properly check for shutdown,
-            # implement the main loop here with proper shutdown checking
-            batch_interval = 600
+            # Get batch interval from environment or use default
+            batch_interval = get_env_int('BATCH_INTERVAL', 300)
             
             while not shutdown_requested:
                 # Process a batch

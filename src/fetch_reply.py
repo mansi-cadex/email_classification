@@ -1,16 +1,6 @@
 """
 fetch_reply.py - Module for fetching, classifying, and moving emails.
-
-This module provides functionality for:
-1. Fetching unread emails from Microsoft Graph API
-2. Classifying emails via API
-3. Moving emails to appropriate folders based on classification
-4. Storing email data in MongoDB
-
-It separates the email fetching and classification from the email sending,
-which is now handled by email_sender.py.
 """
-
 
 import os
 import sys
@@ -20,6 +10,7 @@ import msal
 import requests
 import random
 import logging
+import re
 from functools import wraps
 from datetime import datetime, timedelta
 from urllib.parse import quote, urlencode
@@ -39,7 +30,7 @@ except ImportError:
 load_dotenv()
 
 # Constants
-MS_GRAPH_TIMEOUT = 30  # seconds
+MS_GRAPH_TIMEOUT = int(os.getenv("MS_GRAPH_TIMEOUT", "60"))  # Configurable timeout
 EMAIL_FETCH_TOP = 1000  # Maximum folders to fetch
 MS_GRAPH_BASE_URL = "https://graph.microsoft.com/v1.0"
 
@@ -50,11 +41,11 @@ TENANT_ID = os.getenv("TENANT_ID")
 EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS")
 YOUR_DOMAIN = os.getenv("YOUR_DOMAIN", "abc-amega.com")
 TIME_FILTER_HOURS = 24
-BATCH_SIZE = 125
-
+#BATCH_SIZE = int(os.getenv("BATCH_SIZE", "125"))
+BATCH_SIZE = 5
 # Email sending flags - these will be passed to email_sender but not used directly here
-MAIL_SEND_ENABLED = os.getenv("MAIL_SEND_ENABLED", "False").lower() in ["true", "yes", "1"]
-FORCE_DRAFTS = os.getenv("FORCE_DRAFTS", "True").lower() in ["true", "yes", "1"]
+MAIL_SEND_ENABLED = os.getenv("False")
+FORCE_DRAFTS = os.getenv("FORCE_DRAFTS", "True")
 
 # Log configuration for transparency
 if MAIL_SEND_ENABLED:
@@ -72,17 +63,19 @@ if MAIL_SEND_ENABLED and FORCE_DRAFTS:
     logger.warning("If you want to actually send emails, set FORCE_DRAFTS=False")
 
 # API configuration for the model server
-MODEL_API_URL = "http://0.0.0.0:8080"
+MODEL_API_URL = os.getenv("http://0.0.0.0:8080")
 
-# Final list of allowed labels
+# Updated list of allowed labels
 ALLOWED_LABELS = [
     "no_reply_no_info",
-    "no_reply_with_info",
+    "no_reply_with_info", 
     "auto_reply_no_info",
     "auto_reply_with_info",
     "invoice_request_no_info",
     "claims_paid_no_proof",
-    "manual_review"
+    "claims_paid_with_proof",  # NEW
+    "manual_review",
+    "uncategorised"            # NEW (replaces fallback)
 ]
 
 # Labels that should receive responses
@@ -90,6 +83,13 @@ RESPONSE_LABELS = [
     "invoice_request_no_info",
     "claims_paid_no_proof"
 ]
+
+def validate_config():
+    """Validate all required environment variables"""
+    required_vars = ["CLIENT_ID", "CLIENT_SECRET", "TENANT_ID", "EMAIL_ADDRESS"]
+    missing = [var for var in required_vars if not os.getenv(var)]
+    if missing:
+        raise ValueError(f"Missing required environment variables: {missing}")
 
 def retry_with_backoff(max_retries=3, initial_backoff=1.5):
     """Retry decorator with exponential backoff for HTTP requests."""
@@ -150,18 +150,31 @@ class ModelAPIClient:
         except requests.exceptions.RequestException:
             return False
 
-    def classify_email(self, subject: str, body: str) -> Dict:
-        """Classify an email."""
+    def classify_email(self, subject: str, body: str, headers: List[Dict] = None, 
+                      sender_email: str = None, recipient_emails: List[str] = None, 
+                      has_attachments: bool = False, had_threads: bool = False) -> Dict:
+        """Classify an email with full context including headers and thread information."""
         try:
             # Check if API is available, use fallback if not
             if not self.health_check():
                 logger.warning("Classification API not available, using fallback classification")
-                return {"label": "manual_review", "confidence": 0.0, "method": "fallback"}
+                return {"label": "uncategorised", "confidence": 0.0, "method": "api_unavailable"}
+            
+            # Prepare request payload with all available data
+            payload = {
+                "subject": subject,
+                "body": body,
+                "headers": headers or [],
+                "sender_email": sender_email,
+                "recipient_emails": recipient_emails or [],
+                "has_attachments": has_attachments,
+                "had_threads": had_threads  # NEW: Send thread information to model
+            }
             
             response = requests.post(
-                f"{self.base_url}/api/classify",  # Keep the /api/ prefix
-                json={"subject": subject, "body": body},
-                timeout=30
+                f"{self.base_url}/api/classify",
+                json=payload,
+                timeout=90
             )
             response.raise_for_status()
             result = response.json()
@@ -173,21 +186,25 @@ class ModelAPIClient:
                 return classification
             else:
                 logger.warning(f"Unexpected response format from API: {result}")
-                return {"label": "manual_review", "confidence": 0.0, "method": "api_error"}
+                return {"label": "uncategorised", "confidence": 0.0, "method": "api_error"}
         except Exception as e:
             logger.error(f"Error calling classification API: {e}")
-            return {"label": "manual_review", "confidence": 0.0, "method": "api_error"}
+            return {"label": "uncategorised", "confidence": 0.0, "method": "api_error"}
 
     def generate_reply(self, subject: str, body: str, label: str, entities: Optional[Dict] = None) -> str:
         """Generate a reply for an email."""
         try:
-            # Check if API is available, use fallback if not
+            # Only generate replies for specific labels
+            if label not in RESPONSE_LABELS:
+                return ""
+                
+            # Check if API is available
             if not self.health_check():
-                logger.warning("Reply generation API not available, using fallback reply")
-                return self._generate_fallback_reply(label)
+                logger.warning("Reply generation API not available")
+                return ""
                 
             response = requests.post(
-                f"{self.base_url}/api/generate_reply",  # Keep the /api/ prefix
+                f"{self.base_url}/api/generate_reply",
                 json={
                     "subject": subject,
                     "body": body,
@@ -203,55 +220,10 @@ class ModelAPIClient:
             return reply
         except Exception as e:
             logger.error(f"Error calling reply generation API: {e}")
-            return self._generate_fallback_reply(label)
-    
-    def _generate_fallback_reply(self, label: str) -> str:
-        """Generate a simple fallback reply when API is unavailable."""
-        if label == "invoice_request_no_info":
-            return """Dear Customer,
-
-Thank you for your email. We would be happy to provide you with a copy of the invoice you requested.
-
-To fulfill your request, we need the following information:
-1. Invoice number(s)
-2. Account number
-3. Company name
-
-Once we receive this information, we will promptly send you the requested invoice.
-
-Thank you for your cooperation.
-
-Best regards,
-ABC Collections Team"""
-
-        elif label == "claims_paid_no_proof":
-            return """Dear Customer,
-
-Thank you for informing us about your payment. To properly credit your account, we need verification of the payment.
-
-Please provide one of the following:
-1. Copy of the payment confirmation
-2. Bank transaction reference number
-3. Check number and date of payment
-
-Once we receive this documentation, we will update your account accordingly.
-
-Thank you for your prompt attention to this matter.
-
-Best regards,
-ABC Collections Team"""
-        else:
-            return """Dear Customer,
-
-Thank you for your email. We have received your message and will process it accordingly.
-
-If you have any further questions, please don't hesitate to contact us.
-
-Best regards,
-ABC Collections Team"""
+            return ""
 
 class MSGraphClient:
-    """Microsoft Graph API client for email operations."""
+    """Microsoft Graph API client for email operations with clean text extraction."""
     
     def __init__(self, batch_size=BATCH_SIZE):
         """Initialize with credentials from environment."""
@@ -262,6 +234,7 @@ class MSGraphClient:
         self.email_address = EMAIL_ADDRESS
         self._token_cache = {"token": None, "expires_at": 0}
         self.batch_size = batch_size
+        self.timeout = httpx.Timeout(MS_GRAPH_TIMEOUT)
         
     def get_access_token(self, force_refresh=False):
         """Get a valid access token, refreshing if needed."""
@@ -272,17 +245,9 @@ class MSGraphClient:
                 logger.debug("Using cached access token")
                 return self._token_cache["token"]
             
-            # Check if all required variables are set
-            if not all([self.client_id, self.client_secret, self.tenant_id]):
-                logger.error("Missing required Microsoft Graph API credentials")
-                logger.error("Please set CLIENT_ID, CLIENT_SECRET, and TENANT_ID in .env file")
-                raise ValueError("Missing Microsoft Graph API credentials")
+            # Validate configuration
+            validate_config()
                 
-            if not self.email_address:
-                logger.error("EMAIL_ADDRESS is not set in the .env file")
-                logger.error("Please set EMAIL_ADDRESS to the mailbox you want to access")
-                raise ValueError("Missing EMAIL_ADDRESS in environment variables")
-            
             # Log client and tenant ID for debugging (only show first 8 chars of client_id)
             logger.debug(f"Using client_id: {self.client_id[:8]}*** and tenant_id: {self.tenant_id}")
             
@@ -334,7 +299,7 @@ class MSGraphClient:
         while full_url:
             try:
                 logger.debug(f"Requesting: {full_url}")
-                r = httpx.get(full_url, headers=headers, timeout=MS_GRAPH_TIMEOUT)
+                r = httpx.get(full_url, headers=headers, timeout=self.timeout)
                 r.raise_for_status()
                 data = r.json()
                 for item in data.get("value", []):
@@ -357,17 +322,112 @@ class MSGraphClient:
                 logger.error(f"Error during pagination: {str(e)}")
                 break
     
+    def _html_to_text(self, html_content: str) -> str:
+        """Convert HTML to clean text (simple but effective)"""
+        try:
+            if not html_content:
+                return ""
+            
+            # Remove HTML tags
+            text = re.sub(r'<[^>]+>', '', html_content)
+            
+            # Clean up common HTML entities
+            html_entities = {
+                '&nbsp;': ' ',
+                '&amp;': '&',
+                '&lt;': '<',
+                '&gt;': '>',
+                '&quot;': '"',
+                '&#39;': "'",
+                '&apos;': "'",
+                '\r\n': '\n',
+                '\r': '\n'
+            }
+            
+            for entity, replacement in html_entities.items():
+                text = text.replace(entity, replacement)
+            
+            # Clean up multiple whitespaces and newlines
+            text = re.sub(r'\n\s*\n', '\n\n', text)  # Max 2 consecutive newlines
+            text = re.sub(r'[ \t]+', ' ', text)  # Multiple spaces to single space
+            
+            return text.strip()
+            
+        except Exception as e:
+            logger.warning(f"Error converting HTML to text: {str(e)}")
+            return html_content  # Return original if conversion fails
+
+    def _extract_clean_email_content(self, msg: Dict) -> Tuple[str, str, bool]:
+        """Extract clean email content without HTML and threads"""
+        try:
+            clean_body = ""
+            data_source = ""
+            had_threads = False  # NEW: Track if email had threads
+            
+            # 1. Try uniqueBody first (excludes threads) - COMPLETE content
+            unique_body = msg.get("uniqueBody", {})
+            full_body = msg.get("body", {})
+            
+            # Check if email has threads by comparing uniqueBody with full body
+            if unique_body and unique_body.get("content") and full_body and full_body.get("content"):
+                unique_content = unique_body.get("content", "").strip()
+                full_content = full_body.get("content", "").strip()
+                
+                # If uniqueBody is significantly shorter than full body, it likely had threads
+                if len(unique_content) > 0 and len(full_content) > len(unique_content) * 1.2:
+                    had_threads = True
+                    logger.debug(f"Thread detected: uniqueBody={len(unique_content)} chars, fullBody={len(full_content)} chars")
+            
+            if unique_body and unique_body.get("content"):
+                unique_content = unique_body.get("content", "").strip()
+                content_type = unique_body.get("contentType", "").lower()
+                
+                if content_type == "text":
+                    # Perfect: uniqueBody in text format (no HTML, no threads)
+                    clean_body = unique_content
+                    data_source = "uniqueBody_text"
+                elif content_type == "html" and unique_content:
+                    # Convert HTML to text for uniqueBody (still no threads)
+                    clean_body = self._html_to_text(unique_content)
+                    data_source = "uniqueBody_html_converted"
+            
+            # 2. If uniqueBody not available, use full body content
+            if not clean_body:
+                if full_body and full_body.get("content"):
+                    body_content = full_body.get("content", "").strip()
+                    content_type = full_body.get("contentType", "").lower()
+                    
+                    if content_type == "text":
+                        # Full body in text format
+                        clean_body = body_content
+                        data_source = "body_text"
+                    elif content_type == "html" and body_content:
+                        # Convert HTML to text for full body
+                        clean_body = self._html_to_text(body_content)
+                        data_source = "body_html_converted"
+            
+            # 3. Last resort: bodyPreview (but this is limited to ~160 chars)
+            if not clean_body:
+                clean_body = msg.get("bodyPreview", "").strip()
+                data_source = "bodyPreview_fallback"
+            
+            return clean_body, data_source, had_threads
+            
+        except Exception as e:
+            logger.warning(f"Error extracting clean email content: {str(e)}")
+            return msg.get("bodyPreview", ""), "error_fallback", False
+
     @retry_with_backoff(max_retries=3, initial_backoff=1.5)
     def fetch_unread_emails(self, max_emails=None) -> List[Dict]:
-        """Fetch all unread emails from inbox without time filtering."""
+        """Fetch all unread emails from inbox with clean text (no HTML, no threads)."""
         # Use instance batch_size if none provided
         max_emails = max_emails or self.batch_size
         
-        # Parameters for filtering unread emails - removed time filter
+        # Updated parameters to fetch complete email data including headers and clean body
         params = {
             "$orderby": "receivedDateTime desc",
             "$filter": "isRead eq false and isDraft eq false",
-            "$select": "id,subject,from,bodyPreview,receivedDateTime,hasAttachments,toRecipients",
+            "$select": "id,subject,from,body,bodyPreview,uniqueBody,receivedDateTime,hasAttachments,toRecipients,ccRecipients,internetMessageHeaders,conversationId",
             "$top": max_emails
         }
         
@@ -389,7 +449,7 @@ class MSGraphClient:
             count_url = f"{self.base_url}/users/{self.email_address}/mailFolders/inbox/messages/$count"
             count_params = {"$filter": "isRead eq false"}
             
-            count_response = httpx.get(count_url, headers=count_headers, params=count_params, timeout=MS_GRAPH_TIMEOUT)
+            count_response = httpx.get(count_url, headers=count_headers, params=count_params, timeout=self.timeout)
             total_unread = int(count_response.text) if count_response.status_code == 200 else "unknown"
             logger.info(f"Total unread emails in inbox: {total_unread}")
             
@@ -399,7 +459,7 @@ class MSGraphClient:
             if not emails:
                 logger.info("No unread emails to process.")
             else:
-                logger.info(f"Found {len(emails)} unread emails to process")
+                logger.info(f"Found {len(emails)} unread emails to process with clean text extraction")
                 
             return emails
             
@@ -413,7 +473,6 @@ class MSGraphClient:
             logger.error(f"Error fetching unread emails: {str(e)}")
             return []
     
-    # In the MSGraphClient class, replace the existing move_email_to_folder method with this:
     @retry_with_backoff(max_retries=3, initial_backoff=1.5)
     def move_email_to_folder(self, message_id, folder_id):
         """Move an email to a specific folder in Outlook."""
@@ -424,7 +483,7 @@ class MSGraphClient:
         
         try:
             logger.debug(f"Attempting to move email {message_id} to folder ID: {folder_id}")
-            response = httpx.post(endpoint, headers=headers, json=payload, timeout=20.0)
+            response = httpx.post(endpoint, headers=headers, json=payload, timeout=self.timeout)
             response.raise_for_status()
             result = response.json()
             new_id = result.get("id", "unknown")
@@ -449,7 +508,7 @@ class MSGraphClient:
         payload = {"isRead": is_read}
         
         try:
-            response = httpx.patch(endpoint, headers=headers, json=payload, timeout=20.0)
+            response = httpx.patch(endpoint, headers=headers, json=payload, timeout=self.timeout)
             response.raise_for_status()
             logger.info(f"Email {message_id} marked as {'read' if is_read else 'unread'}")
             return True
@@ -478,7 +537,7 @@ class MSGraphClient:
             odata = f"displayName eq '{escaped}'"
             url = f"{self.base_url}/users/{self.email_address}/mailFolders?$filter={quote(odata)}&$select=id,parentFolderId,displayName"
             
-            r = httpx.get(url, headers=headers, timeout=MS_GRAPH_TIMEOUT)
+            r = httpx.get(url, headers=headers, timeout=self.timeout)
             r.raise_for_status()
             
             items = r.json().get("value", [])
@@ -487,12 +546,12 @@ class MSGraphClient:
         def move_to_parent(folder_id, new_parent_id):
             url = f"{self.base_url}/users/{self.email_address}/mailFolders/{folder_id}"
             httpx.patch(url, headers=headers,
-                      json={"parentFolderId": new_parent_id}, timeout=20).raise_for_status()
+                      json={"parentFolderId": new_parent_id}, timeout=self.timeout).raise_for_status()
         
         # Fetch all folders once with a high limit to reduce paging
         try:
             r = httpx.get(f"{self.base_url}/users/{self.email_address}/mailFolders?$top={EMAIL_FETCH_TOP}",
-                         headers=headers, timeout=MS_GRAPH_TIMEOUT)
+                         headers=headers, timeout=self.timeout)
             r.raise_for_status()
             all_folders = r.json()["value"]
             lookup = {normalize(f["displayName"]): f["id"] for f in all_folders}
@@ -502,7 +561,7 @@ class MSGraphClient:
             if not parent_id:
                 r = httpx.post(f"{self.base_url}/users/{self.email_address}/mailFolders",
                               headers=headers,
-                              json={"displayName": parent_name}, timeout=MS_GRAPH_TIMEOUT)
+                              json={"displayName": parent_name}, timeout=self.timeout)
                 r.raise_for_status()
                 parent_id = r.json()["id"]
                 logger.info(f"Created parent folder '{parent_name}' (ID: {parent_id})")
@@ -530,7 +589,7 @@ class MSGraphClient:
                         try:
                             r = httpx.post(f"{self.base_url}/users/{self.email_address}/mailFolders/{parent_id}/childFolders", 
                                           headers=headers,
-                                          json={"displayName": display}, timeout=MS_GRAPH_TIMEOUT)
+                                          json={"displayName": display}, timeout=self.timeout)
                             if r.status_code == 409:  # Handle conflict explicitly
                                 # Re-query to get the existing folder
                                 ghost = graph_search(display)
@@ -576,7 +635,8 @@ class EmailProcessor:
             "emails_classified": 0,
             "emails_skipped": 0,
             "emails_errored": 0,
-            "emails_moved": 0
+            "emails_moved": 0,
+            "clean_text_extracted": 0
         }
     
     def _prepare_batch(self):
@@ -597,54 +657,80 @@ class EmailProcessor:
                 logger.warning(f"Invalid BATCH_SIZE in environment. Using default: {self.batch_size}")
     
     def _process_single_email(self, msg):
-        """Process a single email message – classify, store, and move to folder."""
+        """Process a single email message – classify, store, and move to folder with clean text."""
         message_id = msg.get("id", "unknown_id")
         
         try:
-            # ── 1 ▸ extract basic metadata ──────────────────────────────────────
+            # ── 1 ▸ extract ALL metadata including headers ──────────────────────
             sender_info = msg.get("from", {}).get("emailAddress", {})
-            sender       = sender_info.get("address", "")
-            subject      = msg.get("subject", "")
-            body_preview = msg.get("bodyPreview", "")
-            received     = msg.get("receivedDateTime", "")
-
-            # first (primary) recipient if present
-            recipient = ""
+            sender = sender_info.get("address", "")
+            subject = msg.get("subject", "")
+            received = msg.get("receivedDateTime", "")
+            has_attachments = msg.get("hasAttachments", False)
+            conversation_id = msg.get("conversationId", "")
+            
+            # Extract clean body content (no HTML, no threads) + thread detection
+            clean_body, data_source, had_threads = self.graph_client._extract_clean_email_content(msg)
+            
+            # Extract headers
+            headers = msg.get("internetMessageHeaders", [])
+            
+            # Extract all recipients
             to_recipients = msg.get("toRecipients", [])
+            cc_recipients = msg.get("ccRecipients", [])
+            recipient_emails = []
+            
+            # Primary recipient
+            recipient = ""
             if to_recipients:
                 recipient_info = to_recipients[0].get("emailAddress", {})
                 recipient = recipient_info.get("address", "")
+                recipient_emails.extend([r.get("emailAddress", {}).get("address", "") for r in to_recipients])
+            
+            # Add CC recipients to the list
+            if cc_recipients:
+                recipient_emails.extend([r.get("emailAddress", {}).get("address", "") for r in cc_recipients])
 
-            logger.info("Processing email %s | From: %s | Subject: %s",
-                        message_id, sender, subject)
+            logger.info("Processing email %s | From: %s | Subject: %s | Data Source: %s | Clean Text Length: %d | Had Threads: %s",
+                        message_id, sender, subject, data_source, len(clean_body), had_threads)
 
-            # ── 2 ▸ skip duplicates ─────────────────────────────────────────────────
+            # Track clean text extraction
+            if data_source.startswith("uniqueBody"):
+                self.metrics["clean_text_extracted"] += 1
+
+            # ── 2 ▸ skip duplicates ─────────────────────────────────────────────
             if self.mongo.email_exists(message_id):
                 logger.info("Skipping already-processed email: %s", message_id)
                 self.metrics["emails_skipped"] += 1
                 return
 
-            # ── 3 ▸ classify with model API ─────────────────────────────────────
+            # ── 3 ▸ classify with FULL context including thread info ────────────
             try:
                 classification_result = self.model_api.classify_email(
-                    subject=subject, body=body_preview
+                    subject=subject,
+                    body=clean_body,  # Use clean text for classification
+                    headers=headers,
+                    sender_email=sender,
+                    recipient_emails=recipient_emails,
+                    has_attachments=has_attachments,
+                    had_threads=had_threads  # NEW: Pass thread information to model
                 )
-                label       = classification_result.get("label", "manual_review")
-                confidence  = classification_result.get("confidence", 0.0)
+                label = classification_result.get("label", "uncategorised")
+                confidence = classification_result.get("confidence", 0.0)
 
                 if label not in ALLOWED_LABELS:
-                    logger.warning("Classifier returned non-allowed label '%s'; using 'manual_review'", label)
-                    label = "manual_review"
+                    logger.warning("Classifier returned non-allowed label '%s'; using 'uncategorised'", label)
+                    label = "uncategorised"
 
-                logger.info("Email %s classified as '%s' (%.2f)",
-                            message_id, label, confidence)
+                logger.info("Email %s classified as '%s' (%.2f) | Had Threads: %s",
+                            message_id, label, confidence, had_threads)
                 self.metrics["emails_classified"] += 1
 
             except Exception:
-                logger.exception("Error during classification for email %s; defaulting to manual_review",
+                logger.exception("Error during classification for email %s; defaulting to uncategorised",
                                 message_id)
-                label       = "manual_review"
-                confidence  = 0.0
+                label = "uncategorised"
+                confidence = 0.0
                 classification_result = {"label": label, "confidence": confidence, "method": "api_error"}
 
             entities = classification_result.get("entities", {})
@@ -656,7 +742,7 @@ class EmailProcessor:
                     logger.info("Generating response for %s with label '%s'", message_id, label)
                     reply_text = self.model_api.generate_reply(
                         subject=subject,
-                        body=body_preview,
+                        body=clean_body,  # Use clean text for reply generation
                         label=label,
                         entities=entities,
                     )
@@ -664,17 +750,17 @@ class EmailProcessor:
                         logger.warning("Empty reply generated for email %s", message_id)
             except Exception:
                 logger.exception("Error generating response for email %s", message_id)
-                label      = "manual_review"
+                label = "uncategorised"
                 reply_text = ""
 
             # ── 5 ▸ flags for drafts / manual review ────────────────────────────
-            needs_manual_review = label not in RESPONSE_LABELS
+            needs_manual_review = label in ["manual_review", "uncategorised"]
             save_as_draft = needs_manual_review
             if not MAIL_SEND_ENABLED or FORCE_DRAFTS:
                 save_as_draft = True
                 logger.info("Forcing email %s to draft due to configuration", message_id)
 
-            # ── 6 ▸ assemble document for Mongo ─────────────────────────────────
+            # ── 6 ▸ assemble document for Mongo with all metadata ───────────────
             self.mongo.set_batch_id(self.batch_id)          # associate batch
 
             email_data = {
@@ -683,8 +769,8 @@ class EmailProcessor:
                 "recipient":         recipient,
                 "to":                recipient,             # back-compat
                 "subject":           subject,
-                "body":              body_preview,
-                "text":              body_preview,
+                "body":              clean_body,            # Store clean text
+                "text":              clean_body,            # back-compat
                 "received_at":       received,
                 "classification":    label,
                 "prediction":        label,
@@ -699,16 +785,32 @@ class EmailProcessor:
                 "draft_saved":       False,
                 "target_folder":     label,
                 "entities":          entities,
+                "conversation_id":   conversation_id,
+                "has_attachments":   has_attachments,
+                "data_source":       data_source,  # Track clean text source
+                "had_threads":       had_threads,  # NEW: Store thread information
+                "headers": {
+                    "internet_headers": headers,
+                    "to_recipients": to_recipients,
+                    "cc_recipients": cc_recipients,
+                    "all_recipients": recipient_emails
+                },
                 "metadata": {
                     "entities":              entities,
-                    "sentiment":             classification_result.get("sentiment", {}),
                     "confidence_score":      confidence,
                     "classification_method": classification_result.get("method", ""),
                     "matching_patterns":     classification_result.get("matching_patterns", []),
+                    "conversation_id":       conversation_id,
+                    "has_attachments":       has_attachments,
+                    "headers_count":         len(headers),
+                    "recipients_count":      len(recipient_emails),
+                    "body_length":          len(clean_body),
+                    "clean_text_source":    data_source,  # Track source of clean text
+                    "had_threads":          had_threads,  # NEW: Store in metadata too
                 },
             }
 
-            # ▸ copy OOO / left-company info if present
+            # ▸ copy OOO / left-company info if present (rest of the code remains same)
             if "ooo_person" in entities:
                 email_data["ooo_person"]         = entities.get("ooo_person", {})
                 email_data["ooo_contact_person"] = entities.get("ooo_contact_person", {})
@@ -731,9 +833,10 @@ class EmailProcessor:
             result = self.mongo.insert_email(email_data)
             if result and hasattr(result, 'inserted_id'):
                 self.mongo.last_inserted_id = result.inserted_id
-            logger.info("Email %s inserted into MongoDB", message_id)
+            logger.info("Email %s inserted into MongoDB with clean text (source: %s, had_threads: %s)", 
+                       message_id, data_source, had_threads)
 
-            # ── 8 ▸ move to folder first ──────────────────────────────────────── (swapped order)
+            # ── 8 ▸ move to folder first ────────────────────────────────────────
             folder_id = self.folder_mapping.get(label)
             logger.debug("Folder mapping for '%s' → %s", label, folder_id)
             
@@ -756,8 +859,8 @@ class EmailProcessor:
                 if logger.isEnabledFor(logging.DEBUG):
                     logger.debug("Available folder-mapping keys: %s", list(self.folder_mapping))
 
-            # ── 9 ▸ then mark read/unread in Outlook ─────────────────────────── (swapped order)
-            is_read = label not in ["manual_review"]
+            # ── 9 ▸ then mark read/unread in Outlook ────────────────────────────
+            is_read = label not in ["manual_review", "uncategorised"]
             self.graph_client.mark_email_read_status(message_id, is_read)  # Using the new ID if moved
 
             self.metrics["emails_processed"] += 1
@@ -765,7 +868,6 @@ class EmailProcessor:
         except Exception:
             logger.exception("Unhandled error processing email %s", message_id)
             self.metrics["emails_errored"] += 1
-
     
     def _sync_with_databases(self):
         """Synchronize processed emails with PostgreSQL and finalize batch."""
@@ -788,7 +890,7 @@ class EmailProcessor:
             logger.error(f"Error synchronizing with databases: {str(e)}")
     
     def process_unread_emails(self) -> Tuple[bool, int, int, int]:
-        """Process all unread emails in the inbox - fetch, classify, and move."""
+        """Process all unread emails in the inbox - fetch, classify, and move with clean text."""
         try:
             # Step 1: Prepare the batch
             self._prepare_batch()
@@ -799,7 +901,8 @@ class EmailProcessor:
                 logger.error("Could not create folder mapping. Aborting.")
                 return False, 0, 0, 0
                 
-            # Step 3: Fetch unread emails
+            # Step 3: Fetch unread emails with clean text
+            logger.info("Fetching unread emails with clean text extraction...")
             emails = self.graph_client.fetch_unread_emails()
             if not emails:
                 logger.info("No emails to process.")
@@ -815,6 +918,9 @@ class EmailProcessor:
             # Step 5: Sync with databases
             self._sync_with_databases()
             
+            # Log clean text extraction metrics
+            logger.info(f"Clean text extraction summary: {self.metrics['clean_text_extracted']} emails used uniqueBody (thread-free)")
+            
             # Return success status and metrics for batch tracking
             return True, self.metrics["emails_processed"], self.metrics["emails_errored"], self.metrics["emails_classified"]
             
@@ -828,99 +934,101 @@ class EmailProcessor:
 
 
 def process_unread_emails(batch_id=None) -> Dict:
-    """Public interface function to process unread emails.
-    
-    Returns a dictionary with processing metrics.
-    """
-    processor = EmailProcessor(batch_id)
-    success, processed, errors, classified = processor.process_unread_emails()
-    
-    return {
-        "success": success,
-        "emails_processed": processed,
-        "emails_classified": classified,
-        "emails_errored": errors,
-        "emails_moved": processor.metrics["emails_moved"],
-        "batch_id": processor.batch_id
-    }
+   """Public interface function to process unread emails with clean text extraction.
+   
+   Returns a dictionary with processing metrics.
+   """
+   processor = EmailProcessor(batch_id)
+   success, processed, errors, classified = processor.process_unread_emails()
+   
+   return {
+       "success": success,
+       "emails_processed": processed,
+       "emails_classified": classified,
+       "emails_errored": errors,
+       "emails_moved": processor.metrics["emails_moved"],
+       "clean_text_extracted": processor.metrics["clean_text_extracted"],
+       "batch_id": processor.batch_id
+   }
 
 
 def main():
-    """Main function to run the email processor."""
-    logger.info("Starting fetch_reply.py")
-    logger.info(f"Using Model API URL: {MODEL_API_URL}")
-    
-    # Log email sending configuration
-    if MAIL_SEND_ENABLED:
-        logger.warning("🚨 EMAIL SENDING IS ENABLED - RUNNING WITH MAIL_SEND_ENABLED=True")
-    else:
-        logger.info("📝 Email sending is disabled - MAIL_SEND_ENABLED=False")
-        
-    if FORCE_DRAFTS:
-        logger.info("📝 FORCE_DRAFTS is enabled - all emails will be saved as drafts")
-    
-    processor = EmailProcessor()
-    processor.stop_requested = False
-    
-    def signal_handler(sig, frame):
-        logger.info("Received interrupt signal, stopping gracefully...")
-        processor.stop_requested = True
-    
-    # Register signal handlers
-    try:
-        import signal
-        signal.signal(signal.SIGINT, signal_handler)
-        signal.signal(signal.SIGTERM, signal_handler)
-    except (ImportError, AttributeError):
-        # Windows or other platforms may not support all signals
-        pass
-        
-    success, processed, errors, classified = processor.process_unread_emails()
-    
-    # Log the outcome
-    logger.info("Email Processing Summary:")
-    logger.info(f"- Emails processed: {processed}")
-    logger.info(f"- Emails classified: {classified}")
-    logger.info(f"- Emails moved: {processor.metrics['emails_moved']}")
-    logger.info(f"- Emails errored: {errors}")
-    logger.info(f"- Emails skipped: {processor.metrics['emails_skipped']}")
-    
-    # Process drafts and send replies if email_sender is available
-    if EMAIL_SENDER_AVAILABLE and processor.batch_id:
-        logger.info("Starting email sending/draft creation phase...")
-        
-        try:
-            # First run the draft emails processor
-            draft_success, draft_failed = process_draft_emails(processor.batch_id)
-            logger.info(f"Draft processing complete: {draft_success} created, {draft_failed} failed")
-            
-            # Then process pending emails
-            sent_success, sent_failed = send_pending_replies(processor.batch_id)
-            logger.info(f"Email sending complete: {sent_success} sent, {sent_failed} failed")
-            
-            logger.info("Email sending/draft creation phase complete")
-        except Exception as e:
-            logger.error(f"Error in email sending/draft creation phase: {str(e)}")
-    
-    # Clean up resources
-    try:
-        processor.mongo.close()
-    except Exception:
-        pass
-    
-    if success:
-        logger.info(f"fetch_reply.py execution completed successfully")
-        sys.exit(0)
-    else:
-        logger.error(f"fetch_reply.py execution completed with errors")
-        sys.exit(1)
-        
+   """Main function to run the email processor with clean text extraction."""
+   logger.info("Starting fetch_reply.py with clean text extraction")
+   logger.info(f"Using Model API URL: {MODEL_API_URL}")
+   
+   # Log email sending configuration
+   if MAIL_SEND_ENABLED:
+       logger.warning("🚨 EMAIL SENDING IS ENABLED - RUNNING WITH MAIL_SEND_ENABLED=True")
+   else:
+       logger.info("📝 Email sending is disabled - MAIL_SEND_ENABLED=False")
+       
+   if FORCE_DRAFTS:
+       logger.info("📝 FORCE_DRAFTS is enabled - all emails will be saved as drafts")
+   
+   processor = EmailProcessor()
+   processor.stop_requested = False
+   
+   def signal_handler(sig, frame):
+       logger.info("Received interrupt signal, stopping gracefully...")
+       processor.stop_requested = True
+   
+   # Register signal handlers
+   try:
+       import signal
+       signal.signal(signal.SIGINT, signal_handler)
+       signal.signal(signal.SIGTERM, signal_handler)
+   except (ImportError, AttributeError):
+       # Windows or other platforms may not support all signals
+       pass
+       
+   success, processed, errors, classified = processor.process_unread_emails()
+   
+   # Log the outcome with clean text metrics
+   logger.info("Email Processing Summary:")
+   logger.info(f"- Emails processed: {processed}")
+   logger.info(f"- Emails classified: {classified}")
+   logger.info(f"- Emails moved: {processor.metrics['emails_moved']}")
+   logger.info(f"- Clean text extracted: {processor.metrics['clean_text_extracted']}")
+   logger.info(f"- Emails errored: {errors}")
+   logger.info(f"- Emails skipped: {processor.metrics['emails_skipped']}")
+   
+   # Process drafts and send replies if email_sender is available
+   if EMAIL_SENDER_AVAILABLE and processor.batch_id:
+       logger.info("Starting email sending/draft creation phase...")
+       
+       try:
+           # First run the draft emails processor
+           draft_success, draft_failed = process_draft_emails(processor.batch_id)
+           logger.info(f"Draft processing complete: {draft_success} created, {draft_failed} failed")
+           
+           # Then process pending emails
+           sent_success, sent_failed = send_pending_replies(processor.batch_id)
+           logger.info(f"Email sending complete: {sent_success} sent, {sent_failed} failed")
+           
+           logger.info("Email sending/draft creation phase complete")
+       except Exception as e:
+           logger.error(f"Error in email sending/draft creation phase: {str(e)}")
+   
+   # Clean up resources
+   try:
+       processor.mongo.close()
+   except Exception:
+       pass
+   
+   if success:
+       logger.info(f"fetch_reply.py execution completed successfully")
+       sys.exit(0)
+   else:
+       logger.error(f"fetch_reply.py execution completed with errors")
+       sys.exit(1)
+       
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        logger.info("Program interrupted by user")
-        sys.exit(0)
-    except Exception as e:
-        logger.exception("Unhandled exception in main:")
-        sys.exit(1)
+   try:
+       main()
+   except KeyboardInterrupt:
+       logger.info("Program interrupted by user")
+       sys.exit(0)
+   except Exception as e:
+       logger.exception("Unhandled exception in main:")
+       sys.exit(1)
