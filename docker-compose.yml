@@ -1,0 +1,50 @@
+version: '3.8'
+
+services:
+  app:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "5000:5000"
+    volumes:
+      - .:/app
+      - ./logs:/app/logs
+    environment:
+      - FLASK_ENV=development
+      - FLASK_APP=main.py
+      - MONGODB_URI=mongodb://mongodb:27017/
+      - MONGODB_DB=email_classification
+      - LOG_LEVEL=INFO
+      - BATCH_SIZE=125
+      - BATCH_INTERVAL=900
+      - MAIL_SEND_ENABLED=False
+      - FORCE_DRAFTS=False
+      - SFTP_ENABLED=False
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  mongodb:
+    image: mongo:latest
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    restart: unless-stopped
+    healthcheck:
+      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+
+volumes:
+  mongodb_data: 

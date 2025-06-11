@@ -19,7 +19,15 @@ from datetime import datetime
 from dotenv import load_dotenv
 from src.log_config import logger
 from loop import clean_failed_batches, retry_failed_batches, process_batch
+from flask import Flask, jsonify
 
+# Initialize Flask app
+app = Flask(__name__)
+
+@app.route('/health')
+def health_check():
+    """Health check endpoint for Docker"""
+    return jsonify({"status": "healthy"}), 200
 
 # Emergency exit handler - will force exit immediately
 def emergency_exit(signum, frame):
@@ -107,8 +115,14 @@ def main():
     logger.info(f"- MAIL_SEND_ENABLED: {os.getenv('MAIL_SEND_ENABLED', 'False')}")
     logger.info(f"- FORCE_DRAFTS: {os.getenv('FORCE_DRAFTS', 'False')}")
     logger.info(f"- SFTP_ENABLED: {os.getenv('SFTP_ENABLED', 'False')}")
-    logger.info(f"- BATCH_SIZE: {get_env_int('BATCH_SIZE', 5)}")
-    logger.info(f"- BATCH_INTERVAL: {get_env_int('BATCH_INTERVAL', 300)} seconds")
+    logger.info(f"- BATCH_SIZE: {get_env_int('BATCH_SIZE', 125)}")
+    logger.info(f"- BATCH_INTERVAL: {get_env_int('BATCH_INTERVAL', 900)} seconds")
+    
+    # Start Flask in a separate thread
+    from threading import Thread
+    flask_thread = Thread(target=lambda: app.run(host='0.0.0.0', port=5000))
+    flask_thread.daemon = True
+    flask_thread.start()
     
     try:
         # Clean up existing failed batches
