@@ -41,8 +41,8 @@ TENANT_ID = os.getenv("TENANT_ID")
 EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS")
 YOUR_DOMAIN = os.getenv("YOUR_DOMAIN", "abc-amega.com")
 TIME_FILTER_HOURS = 24
-#BATCH_SIZE = int(os.getenv("BATCH_SIZE", "125"))
-BATCH_SIZE = 5
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "125"))
+#BATCH_SIZE = 5
 # Email sending flags - these will be passed to email_sender but not used directly here
 MAIL_SEND_ENABLED = os.getenv("False")
 FORCE_DRAFTS = os.getenv("FORCE_DRAFTS", "True")
@@ -63,7 +63,7 @@ if MAIL_SEND_ENABLED and FORCE_DRAFTS:
     logger.warning("If you want to actually send emails, set FORCE_DRAFTS=False")
 
 # API configuration for the model server
-MODEL_API_URL = os.getenv("http://0.0.0.0:8080")
+MODEL_API_URL = os.getenv("MODEL_API_URL","http://34.69.9.12:8000/")
 
 # Updated list of allowed labels
 ALLOWED_LABELS = [
