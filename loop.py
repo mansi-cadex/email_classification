@@ -1,13 +1,6 @@
 """
 loop.py - Batch processing and orchestration for email classification system
 
-This module provides functionality for:
-1. Managing batch lifecycle (create, process, finalize)
-2. Retrying failed batches
-3. Exporting data to Excel reports
-4. Uploading reports to SFTP
-5. Scheduling and running email processing
-
 The module focuses on orchestration and scheduling while delegating specific
 operations to appropriate modules (fetch_reply.py, email_sender.py, db.py).
 """
@@ -65,20 +58,7 @@ RESPONSE_LABELS = ["invoice_request_no_info", "claims_paid_no_proof"]
 # Helper Functions
 def send_email_with_retries(to_address: str, subject: str, body: str, message_id: str = None, 
                            batch_id: str = None, retries: int = 3, delay: int = 30) -> bool:
-    """Send an email with automatic retries on failure.
-    
-    Args:
-        to_address: Recipient email address
-        subject: Email subject
-        body: Email body content
-        message_id: Optional message ID for database update
-        batch_id: Optional batch ID for tracking
-        retries: Maximum number of retry attempts
-        delay: Delay between retries in seconds
-        
-    Returns:
-        bool: True if successful, False otherwise
-    """
+
     for attempt in range(1, retries + 1):
         try:
             # Use refactored email_sender module
@@ -96,14 +76,7 @@ def send_email_with_retries(to_address: str, subject: str, body: str, message_id
 
 
 def ensure_batch_record_exists(batch_id: str) -> bool:
-    """Ensure the batch record exists in both PostgreSQL and MongoDB.
     
-    Args:
-        batch_id: The batch ID to check/create
-        
-    Returns:
-        bool: True if successful, False otherwise
-    """
     if not batch_id:
         logger.warning("Cannot ensure batch record exists: No batch_id provided")
         return False
@@ -208,22 +181,10 @@ def update_batch_id_only(batch_id, limit=1, email_data=None):
         if conn:
             PostgresConnector.return_connection(conn)
 
-# ==========================
-# SFTP Operations
-# ==========================
+
 def upload_to_sftp(filename: str, file_content: Optional[bytes] = None, 
                   max_retries: int = 3, retry_delay: int = 5) -> bool:
-    """Upload files to SFTP server with improved reliability and error handling.
     
-    Args:
-        filename: The name of the file to upload
-        file_content: File content to upload, if provided. Otherwise uploads existing file.
-        max_retries: Maximum number of retry attempts
-        retry_delay: Initial delay between retries in seconds. Doubles after each attempt.
-    
-    Returns:
-        bool: True if successful, False otherwise
-    """
     if not SFTP_ENABLED:
         logger.info(f"SFTP disabled - skipping upload of {filename}")
         return False
@@ -365,14 +326,7 @@ def upload_to_sftp(filename: str, file_content: Optional[bytes] = None,
     return False
 
 def extract_contact_info(email_doc: Dict) -> Dict:
-    """Extract contact information from email document metadata.
     
-    Args:
-        email_doc: Email document from MongoDB
-        
-    Returns:
-        dict: Contact information with status
-    """
     contact_info = {
         "new_contact_email": "", 
         "new_contact_name": "", 
@@ -508,15 +462,7 @@ def extract_contact_info(email_doc: Dict) -> Dict:
     return contact_info
 
 def build_reply_summary(email_doc: Dict, contact_info: Dict) -> str:
-    """Return a short status string for the ReplyText column.
     
-    Args:
-        email_doc: Email document from MongoDB
-        contact_info: Contact information extracted from the email
-        
-    Returns:
-        str: Short reply summary
-    """
     label = email_doc.get("prediction") or email_doc.get("classification") or ""
     contact_status = contact_info.get("contact_status", "active")
     has_updated_info = contact_info.get("has_updated_info", False)
@@ -580,14 +526,7 @@ def build_reply_summary(email_doc: Dict, contact_info: Dict) -> str:
     return "no_response"
 
 def extract_invoice_info(email_doc: Dict) -> Dict:
-    """Extract invoice and payment information from email document.
     
-    Args:
-        email_doc: Email document from MongoDB
-        
-    Returns:
-        dict: Invoice information
-    """
     invoice_info = {
         "invoice_number": "",
         "amount": "",
