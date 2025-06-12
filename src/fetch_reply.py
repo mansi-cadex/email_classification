@@ -63,7 +63,7 @@ if MAIL_SEND_ENABLED and FORCE_DRAFTS:
     logger.warning("If you want to actually send emails, set FORCE_DRAFTS=False")
 
 # API configuration for the model server
-MODEL_API_URL = os.getenv("MODEL_API_URL","http://34.69.9.12:8000/")
+MODEL_API_URL = os.getenv("MODEL_API_URL","http://35.188.121.145:8000/")
 
 # Updated list of allowed labels
 ALLOWED_LABELS = [
@@ -145,7 +145,7 @@ class ModelAPIClient:
     def health_check(self) -> bool:
         """Check if API is available."""
         try:
-            response = requests.get(f"{self.base_url}", timeout=2)
+            response = requests.get(f"{self.base_url}", timeout=10)
             return response.status_code == 200
         except requests.exceptions.RequestException:
             return False
@@ -174,7 +174,7 @@ class ModelAPIClient:
             response = requests.post(
                 f"{self.base_url}/api/classify",
                 json=payload,
-                timeout=90
+                timeout=420
             )
             response.raise_for_status()
             result = response.json()

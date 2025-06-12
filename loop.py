@@ -45,7 +45,7 @@ load_dotenv()
 #BATCH_INTERVAL = 300
 
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "125"))
-BATCH_INTERVAL = int(os.getenv("BATCH_INTERVAL", "6300"))
+BATCH_INTERVAL = int(os.getenv("BATCH_INTERVAL", "21600"))
 MAX_RETRIES = int(os.getenv("MAX_RETRIES"))
 RETRY_DELAY = int(os.getenv("RETRY_DELAY"))
 BATCH_TIMEOUT = int(os.getenv("BATCH_TIMEOUT"))
