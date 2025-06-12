@@ -1,28 +1,21 @@
 version: '3.8'
 
 services:
-  app:
+  email-classification:
     build: 
       context: .
       dockerfile: Dockerfile
+    container_name: email-classification
     ports:
       - "5000:5000"
     volumes:
-      - .:/app
       - ./logs:/app/logs
-    environment:
-      - FLASK_ENV=development
-      - FLASK_APP=main.py
-      - MONGODB_URI=mongodb://mongodb:27017/
-      - MONGODB_DB=email_classification
-      - LOG_LEVEL=INFO
-      - BATCH_SIZE=125
-      - BATCH_INTERVAL=900
-      - MAIL_SEND_ENABLED=False
-      - FORCE_DRAFTS=False
-      - SFTP_ENABLED=False
+    env_file:
+      - .env
     depends_on:
       mongodb:
+        condition: service_healthy
+      postgresql:
         condition: service_healthy
     restart: unless-stopped
     healthcheck:
@@ -30,21 +23,61 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 40s
+      start_period: 60s
+    networks:
+      - email-network
 
   mongodb:
-    image: mongo:latest
+    image: mongo:7.0
+    container_name: email-mongodb
     ports:
       - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: password123
+      MONGO_INITDB_DATABASE: email_classification
     volumes:
       - mongodb_data:/data/db
+      - ./mongo-init:/docker-entrypoint-initdb.d
     restart: unless-stopped
     healthcheck:
-      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
+      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/email_classification --quiet
       interval: 10s
       timeout: 10s
       retries: 5
       start_period: 40s
+    networks:
+      - email-network
+
+  postgresql:
+    image: postgres:15
+    container_name: email-postgresql
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: o2c_dev
+      POSTGRES_USER: sanskar_gawande
+      POSTGRES_PASSWORD: sanskar_gawande
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres-init:/docker-entrypoint-initdb.d
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sanskar_gawande -d o2c_dev"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - email-network
 
 volumes:
-  mongodb_data: 
+  mongodb_data:
+    driver: local
+  postgres_data:
+    driver: local
+
+networks:
+  email-network:
+    driver: bridge
