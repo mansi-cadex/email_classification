@@ -11,12 +11,13 @@ msal==1.24.0
 pymongo==4.5.0
 psycopg2-binary==2.9.7
 
-# SFTP and SSH functionality (paramiko for SFTP operations in loop.py)
+# SFTP and SSH functionality
 paramiko==3.3.1
 scp==0.14.5
 
-# Excel file handling and data processing (pandas for export_processed_emails_to_excel in loop.py)
-pandas==2.1.0
+# Excel file handling - FIXED VERSIONS
+pandas==2.0.3
+numpy==1.24.3
 openpyxl==3.1.2
 xlsxwriter==3.1.9
 
