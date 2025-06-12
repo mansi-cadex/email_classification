@@ -49,11 +49,6 @@ test_db.py
 *.json
 *.db
 
-# Docker
-Dockerfile
-docker-compose.yml
-.dockerignore
-
 # Environment variables
 .env
 .env.* 

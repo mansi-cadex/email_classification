@@ -27,8 +27,9 @@ from src.log_config import logger
 load_dotenv()
 
 # Global configuration flags - read directly from environment
-MAIL_SEND_ENABLED = os.getenv("False")
-FORCE_DRAFTS = os.getenv("FORCE_DRAFTS", "True")
+MAIL_SEND_ENABLED = os.getenv("MAIL_SEND_ENABLED", "False").lower() in ["true", "1", "yes"]
+FORCE_DRAFTS = os.getenv("FORCE_DRAFTS", "True").lower() in ["true", "1", "yes"]
+
 
 # Log email sending configuration
 if MAIL_SEND_ENABLED:

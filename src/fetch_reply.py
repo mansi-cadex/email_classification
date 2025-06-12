@@ -44,8 +44,8 @@ TIME_FILTER_HOURS = 24
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "125"))
 #BATCH_SIZE = 5
 # Email sending flags - these will be passed to email_sender but not used directly here
-MAIL_SEND_ENABLED = os.getenv("False")
-FORCE_DRAFTS = os.getenv("FORCE_DRAFTS", "True")
+MAIL_SEND_ENABLED = os.getenv("MAIL_SEND_ENABLED", "False").lower() in ["true", "1", "yes"]
+FORCE_DRAFTS = os.getenv("FORCE_DRAFTS", "True").lower() in ["true", "1", "yes"]
 
 # Log configuration for transparency
 if MAIL_SEND_ENABLED:

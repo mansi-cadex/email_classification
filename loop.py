@@ -39,11 +39,11 @@ load_dotenv()
 
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "125"))
 BATCH_INTERVAL = int(os.getenv("BATCH_INTERVAL", "21600"))
-MAX_RETRIES = int(os.getenv("MAX_RETRIES"))
-RETRY_DELAY = int(os.getenv("RETRY_DELAY"))
-BATCH_TIMEOUT = int(os.getenv("BATCH_TIMEOUT"))
-MAIL_SEND_ENABLED = os.getenv("False")
-FORCE_DRAFTS = os.getenv("FORCE_DRAFTS","True")
+MAX_RETRIES = int(os.getenv("MAX_RETRIES", 3))
+RETRY_DELAY = int(os.getenv("RETRY_DELAY", 600))
+BATCH_TIMEOUT = int(os.getenv("BATCH_TIMEOUT", 21600))
+MAIL_SEND_ENABLED = os.getenv("MAIL_SEND_ENABLED", "False").lower() in ["true", "yes", "1"]
+FORCE_DRAFTS = os.getenv("FORCE_DRAFTS", "True").lower() in ["true", "yes", "1"]
 
 # SFTP Configuration
 SFTP_HOST = os.getenv("SFTP_HOST")
