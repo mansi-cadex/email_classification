@@ -20,6 +20,8 @@ from typing import Dict, List, Optional, Union, Any, Tuple
 from psycopg2 import pool, extras
 from psycopg2.extras import execute_batch
 from src.log_config import logger
+from dotenv import load_dotenv
+load_dotenv()
 
 # =====================================
 # Configuration Constants
@@ -816,14 +818,20 @@ class PostgresConnector:
     
     @classmethod
     def _get_pool(cls):
-        """Get or create the connection pool."""
         if cls._pool is None:
+            # Debug: Print all variables
+            print("DB_HOST:", os.getenv("DB_HOST"))
+            print("DB_PORT:", os.getenv("DB_PORT"))
+            print("DB_NAME:", os.getenv("DB_NAME"))
+            print("DB_USERNAME:", os.getenv("DB_USERNAME"))
+            print("DB_PASSWORD:", os.getenv("DB_PASSWORD"))
+
             try:
                 cls._pool = pool.ThreadedConnectionPool(
                     minconn=1,
                     maxconn=10,
                     host=os.getenv("DB_HOST"),
-                    port=os.getenv("DB_PORT", 5432),
+                    port=int(os.getenv("DB_PORT", 5432)),
                     dbname=os.getenv("DB_NAME"),
                     user=os.getenv("DB_USERNAME"),
                     password=os.getenv("DB_PASSWORD")
@@ -833,6 +841,7 @@ class PostgresConnector:
                 logger.error(f"Error initializing PostgreSQL connection pool: {str(e)}")
                 cls._pool = None
         return cls._pool
+
     
     @classmethod
     def get_connection(cls):
