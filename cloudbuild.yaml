@@ -1,0 +1,42 @@
+steps:
+# Build the container image
+- name: 'gcr.io/cloud-builders/docker'
+  args: ['build', '-t', 'us-central1-docker.pkg.dev/dandsltd-dev/email-classification/dev:$COMMIT_SHA', '.']
+
+# Push the container image to Artifact Registry
+- name: 'gcr.io/cloud-builders/docker'
+  args: ['push', 'us-central1-docker.pkg.dev/dandsltd-dev/email-classification/dev:$COMMIT_SHA']
+
+# Authenticate to GKE
+- name: 'gcr.io/cloud-builders/gke-deploy'
+  entrypoint: 'bash'
+  args:
+  - '-c'
+  - |
+    gcloud container clusters get-credentials o2c-dandsltd-dev-us-central1-dev-gke --region us-central1 --project dandsltd-dev
+
+# Deploy to GKE
+- name: 'gcr.io/cloud-builders/gke-deploy'
+  args:
+  - 'run'
+  - '--filename=k8s/deployment.yaml'
+  - '--location=us-central1'
+  - '--cluster=o2c-dandsltd-dev-us-central1-dev-gke'
+  - '--namespace=develop'
+  - '--image=us-central1-docker.pkg.dev/dandsltd-dev/email-classification/dev:$COMMIT_SHA'
+
+# Tag the image with 'latest'
+- name: 'gcr.io/cloud-builders/docker'
+  args: ['tag', 'us-central1-docker.pkg.dev/dandsltd-dev/email-classification/dev:$COMMIT_SHA', 'us-central1-docker.pkg.dev/dandsltd-dev/email-classification/dev:latest']
+
+# Push the 'latest' tag
+- name: 'gcr.io/cloud-builders/docker'
+  args: ['push', 'us-central1-docker.pkg.dev/dandsltd-dev/email-classification/dev:latest']
+
+images:
+- 'us-central1-docker.pkg.dev/dandsltd-dev/email-classification/dev:$COMMIT_SHA'
+- 'us-central1-docker.pkg.dev/dandsltd-dev/email-classification/dev:latest'
+
+timeout: '1800s'
+options:
+  logging: CLOUD_LOGGING_ONLY 
