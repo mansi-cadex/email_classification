@@ -23,6 +23,7 @@ from dotenv import load_dotenv
 from src.db import get_mongo, PostgresHelper
 from src.log_config import logger
 
+
 # Load environment variables
 load_dotenv()
 
