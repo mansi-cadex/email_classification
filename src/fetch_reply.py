@@ -30,8 +30,8 @@ except ImportError:
 load_dotenv()
 
 # Constants
-MS_GRAPH_TIMEOUT = int(os.getenv("MS_GRAPH_TIMEOUT", "60"))  # Configurable timeout
-EMAIL_FETCH_TOP = 1000  # Maximum folders to fetch
+MS_GRAPH_TIMEOUT = int(os.getenv("MS_GRAPH_TIMEOUT", "60"))  
+EMAIL_FETCH_TOP = 1000  
 MS_GRAPH_BASE_URL = "https://graph.microsoft.com/v1.0"
 
 # Configuration from environment variables
@@ -56,7 +56,6 @@ else:
 
 if FORCE_DRAFTS:
     logger.info("📝 FORCE_DRAFTS is enabled - all emails will be saved as drafts regardless of other settings")
-    
 if MAIL_SEND_ENABLED and FORCE_DRAFTS:
     logger.warning("⚠️ CONFLICT IN CONFIGURATION: Both MAIL_SEND_ENABLED and FORCE_DRAFTS are True.")
     logger.warning("This will result in emails being saved as drafts despite mail sending being enabled.")
