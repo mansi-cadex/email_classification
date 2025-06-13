@@ -56,19 +56,25 @@ RESPONSE_LABELS = [
 # =====================================
 # MongoDB Operations
 # =====================================
-
 class MongoConnector:
     """MongoDB operations for email classification system."""
     
     def __init__(self, uri=None, db_name=None, collection_name=None):
         """Initialize MongoDB connection with database and collections."""
         try:
-            self.uri = uri or os.getenv("MONGO_URI", "mongodb://localhost:27017")
-            self.client = MongoClient(self.uri)
-            self.db_name = db_name or os.getenv("MONGO_DB", "emailDB")
-            self.collection_name = collection_name or os.getenv("MONGO_COLLECTION", "classified_emails")
-            self.db = self.client[self.db_name]
+            self.uri = uri or os.getenv("MONGO_URI")
+            if not self.uri:
+                raise ValueError("MONGO_URI is not set. Please define it in your .env file.")
             
+            self.client = MongoClient(self.uri)
+            self.db_name = db_name or os.getenv("MONGO_DB")
+            self.collection_name = collection_name or os.getenv("MONGO_COLLECTION")
+            
+            if not self.db_name or not self.collection_name:
+                raise ValueError("MONGO_DB and MONGO_COLLECTION must be set in your .env file.")
+            
+            self.db = self.client[self.db_name]
+
             # Initialize collections
             self.collection = self.db[self.collection_name]
             self.template_collection = self.db["email_templates"]
@@ -81,7 +87,6 @@ class MongoConnector:
             # Setup indexes for all collections
             self._setup_indexes()
             
-            # Current batch ID for operations that need it
             self.current_batch_id = None
             
             logger.info(f"Connected to MongoDB: db={self.db_name}, collection={self.collection_name}")
