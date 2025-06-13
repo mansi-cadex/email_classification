@@ -17,6 +17,9 @@ steps:
 
 # Update deployment with new image
 - name: 'gcr.io/cloud-builders/kubectl'
+  env:
+  - 'CLOUDSDK_COMPUTE_REGION=us-central1'
+  - 'CLOUDSDK_CONTAINER_CLUSTER=o2c-dandsltd-dev-us-central1-dev-gke'
   args:
   - 'set'
   - 'image'
