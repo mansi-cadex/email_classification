@@ -42,7 +42,7 @@ EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS")
 YOUR_DOMAIN = os.getenv("YOUR_DOMAIN", "abc-amega.com")
 TIME_FILTER_HOURS = 24
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "125"))
-#BATCH_SIZE = 5
+
 # Email sending flags - these will be passed to email_sender but not used directly here
 MAIL_SEND_ENABLED = os.getenv("MAIL_SEND_ENABLED", "False").lower() in ["true", "1", "yes"]
 FORCE_DRAFTS = os.getenv("FORCE_DRAFTS", "True").lower() in ["true", "1", "yes"]

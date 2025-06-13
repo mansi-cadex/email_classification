@@ -822,11 +822,11 @@ class PostgresConnector:
                 cls._pool = pool.ThreadedConnectionPool(
                     minconn=1,
                     maxconn=10,
-                    host=os.getenv("PGHOST"),
-                    port=os.getenv("PGPORT"),
-                    dbname=os.getenv("PGDATABASE"),
-                    user=os.getenv("PGUSER"),
-                    password=os.getenv("PGPASSWORD")
+                    host=os.getenv("DB_HOST"),
+                    port=os.getenv("DB_PORT", 5432),
+                    dbname=os.getenv("DB_NAME"),
+                    user=os.getenv("DB_USERNAME"),
+                    password=os.getenv("DB_PASSWORD")
                 )
                 logger.info("PostgreSQL connection pool initialized")
             except Exception as e:
