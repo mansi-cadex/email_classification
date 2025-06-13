@@ -15,15 +15,15 @@ steps:
   - |
     gcloud container clusters get-credentials o2c-dandsltd-dev-us-central1-dev-gke --region us-central1 --project dandsltd-dev
 
-# Deploy to GKE
-- name: 'gcr.io/cloud-builders/gke-deploy'
+# Update deployment with new image
+- name: 'gcr.io/cloud-builders/kubectl'
   args:
-  - 'run'
-  - '--filename=k8s/deployment.yaml'
-  - '--location=us-central1'
-  - '--cluster=o2c-dandsltd-dev-us-central1-dev-gke'
-  - '--namespace=develop'
-  - '--image=us-central1-docker.pkg.dev/dandsltd-dev/email-classification/dev:$COMMIT_SHA'
+  - 'set'
+  - 'image'
+  - 'deployment/email-classification'
+  - 'email-classification=us-central1-docker.pkg.dev/dandsltd-dev/email-classification/dev:$COMMIT_SHA'
+  - '-n'
+  - 'develop'
 
 # Tag the image with 'latest'
 - name: 'gcr.io/cloud-builders/docker'
