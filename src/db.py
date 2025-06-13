@@ -112,15 +112,29 @@ class MongoConnector:
             ]
             
             for index_fields, index_options in index_definitions:
-                self.collection.create_index(index_fields, **index_options)
-            
+                try:
+                    self.collection.create_index(index_fields, **index_options)
+                except Exception as e:
+                    # Specifically handle the index conflict error for unique index on message_id
+                    if (
+                        index_fields == [("message_id", ASCENDING)]
+                        and "IndexOptionsConflict" in str(e)
+                    ):
+                        logger.warning(
+                            "Unique index on 'message_id' already exists with a different name, skipping creation."
+                        )
+                        continue
+                    else:
+                        logger.error(f"Error creating index {index_fields}: {e}")
+                        raise
+
             # Batch runs collection indexes
             self.batch_runs_collection.create_index([("id", ASCENDING)], unique=True)
             self.batch_runs_collection.create_index([("status", ASCENDING)])
             self.batch_runs_collection.create_index([("created_at", ASCENDING)])
             self.batch_runs_collection.create_index([("permanently_failed", ASCENDING)])
             self.batch_runs_collection.create_index([("retry_count", ASCENDING)])
-            
+
             # TTL index for auto-archiving
             ttl_days = os.getenv("EMAIL_TTL_DAYS")
             if ttl_days and ttl_days.isdigit() and int(ttl_days) > 0:
@@ -128,18 +142,19 @@ class MongoConnector:
                     [("created_at", ASCENDING)], 
                     expireAfterSeconds=int(ttl_days) * 86400
                 )
-            
+
             # Other collection indexes
             self.payment_collection.create_index([("invoice_number", ASCENDING)], unique=True)
             self.payment_collection.create_index([("email", ASCENDING)])
             self.contact_collection.create_index([("original_email", ASCENDING)], unique=True)
             self.contact_collection.create_index([("is_processed", ASCENDING)])
             self.billing_collection.create_index([("timestamp", 1)])
-            
+
             logger.info("MongoDB indexes setup complete")
         except Exception as e:
             logger.error(f"Error setting up MongoDB indexes: {str(e)}")
             raise
+
     
     def _validate_and_process_email(self, email_data):
         """Validate and process email data before inserting/updating."""
