@@ -1,0 +1,71 @@
+# Global settings
+namespace: develop
+image:
+  repository: us-central1-docker.pkg.dev/dandsltd-dev/email-classification
+  tag: latest
+  pullPolicy: Always
+
+# Deployment settings
+deployment:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 25%
+      maxSurge: 25%
+  revisionHistoryLimit: 10
+  progressDeadlineSeconds: 600
+
+# Service settings
+service:
+  type: LoadBalancer
+  port: 80
+  targetPort: 5000
+  sessionAffinity: None
+  ipFamilies:
+    - IPv4
+  ipFamilyPolicy: SingleStack
+  internalTrafficPolicy: Cluster
+
+# ConfigMap settings
+config:
+  pythonUnbuffered: "1"
+  pythonDontWriteBytecode: "1"
+  pythonPath: "/app"
+  logLevel: "INFO"
+  logDir: "/app/logs"
+  batchSize: "125"
+  maxRetries: "3"
+  retryDelay: "600"
+  mailSendEnabled: "False"
+  forceDrafts: "True"
+  msGraphTimeout: "60"
+  addEmailFooter: "true"
+  yourDomain: "abc-amega.com"
+  timeFilterHours: "24"
+  emailFetchTop: "1000"
+  dbHost: "10.60.0.5"
+  dbPort: "5432"
+  dbName: "o2c_dev"
+  dbSchema: "core"
+  dbType: "postgres"
+  mongoDb: "email_classification"
+  mongoCollection: "emails"
+  sftpHost: "sftp.abc-amega.com"
+  sftpPort: "22"
+  sftpEnabled: "True"
+  modelApiUrl: "http://34.72.113.155:8000"
+  batchInterval: "22500"
+  batchTimeout: "22500"
+
+# Secret settings
+secrets:
+  dbPassword: ""  # To be provided during deployment
+  clientSecret: ""
+  mongoUri: "" 
+  sftpPassword: "" 
+  dbUsername: "" 
+  clientId: "" 
+  tenantId: "" 
+  emailAddress: ""  
+  sftpUsername: ""  
