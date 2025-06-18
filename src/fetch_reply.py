@@ -739,6 +739,17 @@ class EmailProcessor:
 
             entities = classification_result.get("entities", {})
 
+            # ── 3.5 ▸ extract and process file numbers for debtor contact matching ──
+            file_numbers = entities.get("file_numbers", [])
+            primary_file_number = file_numbers[0] if file_numbers else None
+            
+            # Log file number extraction for debugging
+            if file_numbers:
+                logger.info("Email %s contains file numbers: %s | Primary: %s", 
+                        message_id, file_numbers, primary_file_number)
+            else:
+                logger.debug("Email %s contains no file numbers - will use email-based matching", message_id)
+
             # ── 4 ▸ generate a reply if needed ──────────────────────────────────
             reply_text = ""
             try:
@@ -764,7 +775,7 @@ class EmailProcessor:
                 save_as_draft = True
                 logger.info("Forcing email %s to draft due to configuration", message_id)
 
-            # ── 6 ▸ assemble document for Mongo with all metadata ───────────────
+            # ── 6 ▸ assemble document for Mongo with all metadata including file numbers ────
             self.mongo.set_batch_id(self.batch_id)          # associate batch
 
             email_data = {
@@ -793,6 +804,9 @@ class EmailProcessor:
                 "has_attachments":   has_attachments,
                 "data_source":       data_source,  # Track clean text source
                 "had_threads":       had_threads,  # NEW: Store thread information
+                # ── NEW: File number fields for debtor contact matching ──
+                "file_numbers":      file_numbers,           # All extracted file numbers
+                "primary_file_number": primary_file_number,  # Primary file number for matching
                 "headers": {
                     "internet_headers": headers,
                     "to_recipients": to_recipients,
@@ -811,6 +825,14 @@ class EmailProcessor:
                     "body_length":          len(clean_body),
                     "clean_text_source":    data_source,  # Track source of clean text
                     "had_threads":          had_threads,  # NEW: Store in metadata too
+                    # ── NEW: File number metadata for tracking and debugging ──
+                    "file_numbers_count":   len(file_numbers),
+                    "has_file_numbers":     bool(file_numbers),
+                    "primary_file_number":  primary_file_number,
+                    "all_file_numbers":     file_numbers,
+                    # ── NEW: Debtor contact matching strategy ──
+                    "debtor_matching_strategy": "file_number_primary" if primary_file_number else "email_fallback",
+                    "debtor_matching_key":      primary_file_number or sender,
                 },
             }
 
@@ -833,12 +855,31 @@ class EmailProcessor:
                     "replacement": email_data["replacement_contact"],
                 }
 
+            # ── NEW: Enhanced file number info in metadata for debugging ──
+            if file_numbers:
+                email_data["metadata"]["file_number_extraction"] = {
+                    "extracted_count": len(file_numbers),
+                    "all_numbers": file_numbers,
+                    "primary_number": primary_file_number,
+                    "extraction_source": "entities_api_response",
+                    "will_use_for_matching": True
+                }
+            else:
+                email_data["metadata"]["file_number_extraction"] = {
+                    "extracted_count": 0,
+                    "all_numbers": [],
+                    "primary_number": None,
+                    "extraction_source": "none_found",
+                    "will_use_for_matching": False,
+                    "fallback_to": "email_address"
+                }
+
             # ── 7 ▸ insert in Mongo ─────────────────────────────────────────────
             result = self.mongo.insert_email(email_data)
             if result and hasattr(result, 'inserted_id'):
                 self.mongo.last_inserted_id = result.inserted_id
-            logger.info("Email %s inserted into MongoDB with clean text (source: %s, had_threads: %s)", 
-                       message_id, data_source, had_threads)
+            logger.info("Email %s inserted into MongoDB with clean text (source: %s, had_threads: %s, file_numbers: %s)", 
+                    message_id, data_source, had_threads, len(file_numbers))
 
             # ── 8 ▸ move to folder first ────────────────────────────────────────
             folder_id = self.folder_mapping.get(label)

@@ -325,17 +325,61 @@ def upload_to_sftp(filename: str, file_content: Optional[bytes] = None,
     logger.error(f"Failed to upload {filename} to SFTP after {max_retries} attempts")
     return False
 
+
 def extract_contact_info(email_doc: Dict) -> Dict:
+    """Extract contact information with file number support for debtor matching."""
     
     contact_info = {
         "new_contact_email": "", 
         "new_contact_name": "", 
         "new_contact_phone": "",
         "contact_status": "active",  # Default status
-        "has_updated_info": False    # Track if any contact info was updated
+        "has_updated_info": False,   # Track if any contact info was updated
+        # ── NEW: File number fields for debtor contact matching ──
+        "file_numbers": [],          # All extracted file numbers
+        "primary_file_number": "",   # Primary file number for ABCC matching
+        "debtor_matching_key": "",   # Key to use for debtor lookup (file number or email)
+        "debtor_matching_strategy": "email_fallback"  # Strategy used for matching
     }
     
-    # First try to get entities directly from the stored API response
+    # ── 1 ▸ Extract file numbers from email document ────────────────────────
+    # First try to get file numbers from the main document level
+    file_numbers = email_doc.get("file_numbers", [])
+    primary_file_number = email_doc.get("primary_file_number", "")
+    
+    # If not found at document level, check entities
+    if not file_numbers:
+        entities = email_doc.get("entities", {})
+        if not entities:
+            meta = email_doc.get("metadata", {})
+            entities = meta.get("entities", {})
+        if not entities:
+            entities = email_doc.get("extracted_data", {}).get("entities", {})
+        
+        if entities:
+            file_numbers = entities.get("file_numbers", [])
+            if file_numbers and not primary_file_number:
+                primary_file_number = file_numbers[0]
+    
+    # Store file number information
+    contact_info["file_numbers"] = file_numbers
+    contact_info["primary_file_number"] = primary_file_number
+    
+    # ── 2 ▸ Determine debtor matching strategy based on file numbers ─────────
+    sender_email = email_doc.get("sender", "")
+    
+    if primary_file_number:
+        # Primary strategy: Use file number for ABCC debtor lookup
+        contact_info["debtor_matching_key"] = primary_file_number
+        contact_info["debtor_matching_strategy"] = "file_number_primary"
+        logger.info(f"Email will use file number '{primary_file_number}' for debtor contact matching")
+    else:
+        # Fallback strategy: Use email address for ABCC debtor lookup
+        contact_info["debtor_matching_key"] = sender_email
+        contact_info["debtor_matching_strategy"] = "email_fallback"
+        logger.debug(f"Email will use email address '{sender_email}' for debtor contact matching (no file number found)")
+    
+    # ── 3 ▸ Extract entities for contact information (existing logic) ────────
     entities = email_doc.get("entities", {})
     
     # If not found directly, try looking in metadata
@@ -367,7 +411,7 @@ def extract_contact_info(email_doc: Dict) -> Dict:
             contact_info["new_contact_name"] = people[0]
             contact_info["has_updated_info"] = True
     
-    # Check metadata for special cases
+    # ── 4 ▸ Check metadata for special cases (existing logic) ────────────────
     meta = email_doc.get("metadata", {})
     
     # Check for permanent departure (left company info)
@@ -458,6 +502,13 @@ def extract_contact_info(email_doc: Dict) -> Dict:
     if sender and any(domain in sender for domain in ["service-now.com", "noreply", "no-reply", "donotreply", "system@", "notification@"]):
         # Service accounts should always remain active
         contact_info["contact_status"] = "service_account"
+    
+    # ── 5 ▸ Log file number extraction results for debugging ─────────────────
+    if file_numbers:
+        logger.info(f"File number extraction complete: {len(file_numbers)} numbers found, "
+                   f"primary: '{primary_file_number}', strategy: {contact_info['debtor_matching_strategy']}")
+    else:
+        logger.debug(f"No file numbers found in email, using email fallback strategy")
         
     return contact_info
 
@@ -569,7 +620,7 @@ def extract_invoice_info(email_doc: Dict) -> Dict:
     return invoice_info
 
 def export_processed_emails_to_excel(batch_id: str) -> Optional[str]:
-    """Export processed emails to Excel and upload to SFTP."""
+    """Export processed emails to Excel with file number support and upload to SFTP."""
     if not batch_id:
         logger.warning("Cannot export to Excel: No batch_id provided")
         return None
@@ -591,9 +642,17 @@ def export_processed_emails_to_excel(batch_id: str) -> Optional[str]:
             return None
 
         rows = []
+        file_number_stats = {"with_file_numbers": 0, "without_file_numbers": 0}
+        
         for e in emails:
-            # Extract contact information
+            # Extract contact information with file number support
             contact_info = extract_contact_info(e)
+            
+            # Track file number statistics
+            if contact_info.get("primary_file_number"):
+                file_number_stats["with_file_numbers"] += 1
+            else:
+                file_number_stats["without_file_numbers"] += 1
             
             # Only emails with certain labels should get response statuses
             needs_response = e.get("prediction") in RESPONSE_LABELS
@@ -613,14 +672,19 @@ def export_processed_emails_to_excel(batch_id: str) -> Optional[str]:
             # Determine target folder
             target_folder = e.get("target_folder", "") or e.get("prediction", "")
             
-            # Get clean email body - THIS IS THE KEY CHANGE
+            # Get clean email body
             email_body = e.get("body", "") or e.get("text", "")
             
             # Truncate if too long for Excel
             if len(email_body) > 32767:
                 email_body = email_body[:32764] + "..."
             
-            # Create row - BODY REPLACES ReplyText
+            # ── NEW: Prepare file number data for Excel export ──
+            file_numbers = contact_info.get("file_numbers", [])
+            primary_file_number = contact_info.get("primary_file_number", "")
+            all_file_numbers_str = ", ".join(file_numbers) if file_numbers else ""
+            
+            # Create row with file number information
             row = {
                 "EmailFrom": e.get("sender", ""),
                 "EmailTo": e.get("recipient", e.get("to", "")),
@@ -629,7 +693,13 @@ def export_processed_emails_to_excel(batch_id: str) -> Optional[str]:
                 "Event Type": e.get("prediction", e.get("classification", "")),
                 "TargetFolder": target_folder,
                 "ReplySent": reply_sent,
-                "Body": email_body,  # CHANGED: ReplyText -> Body
+                "Body": email_body,
+                # ── NEW: File number columns for ABCC integration ──
+                "PrimaryFileNumber": primary_file_number,                    # Primary ABCFn for debtor lookup
+                "AllFileNumbers": all_file_numbers_str,                     # All file numbers found (comma-separated)
+                "DebtorMatchingKey": contact_info.get("debtor_matching_key", ""),   # Key used for ABCC lookup
+                "DebtorMatchingStrategy": contact_info.get("debtor_matching_strategy", ""),  # Strategy used
+                # ── Existing contact information columns ──
                 "NewContactEmail": contact_info.get("new_contact_email", ""),
                 "NewContactPhone": contact_info.get("new_contact_phone", ""),
                 "ContactStatus": contact_info.get("contact_status", "active")
@@ -639,13 +709,17 @@ def export_processed_emails_to_excel(batch_id: str) -> Optional[str]:
 
         df = pd.DataFrame(rows)
         
-        # Column order - UPDATED: ReplyText -> Body
+        # ── NEW: Column order with file number columns ──
         cols = [
             "EmailFrom", "EmailTo", "SubjectLine", "Date",
             "Event Type", "TargetFolder", "ReplySent", "Body",
+            # ── NEW: File number columns first for visibility ──
+            "PrimaryFileNumber", "AllFileNumbers", "DebtorMatchingKey", "DebtorMatchingStrategy",
+            # ── Existing contact columns ──
             "NewContactEmail", "NewContactPhone", "ContactStatus"
         ]
         
+        # Ensure all columns exist in the DataFrame
         for col in cols:
             if col not in df.columns:
                 df[col] = ""
@@ -662,8 +736,19 @@ def export_processed_emails_to_excel(batch_id: str) -> Optional[str]:
         df.to_excel(buf, index=False)
         buf.seek(0)
         
+        # ── NEW: Log file number statistics ──
+        total_emails = len(emails)
+        logger.info(f"Excel export file number statistics for batch {batch_id}:")
+        logger.info(f"  - Total emails: {total_emails}")
+        logger.info(f"  - With file numbers: {file_number_stats['with_file_numbers']} ({file_number_stats['with_file_numbers']/total_emails*100:.1f}%)")
+        logger.info(f"  - Without file numbers: {file_number_stats['without_file_numbers']} ({file_number_stats['without_file_numbers']/total_emails*100:.1f}%)")
+        
         # Upload to SFTP
         upload_success = upload_to_sftp(fname, buf.getvalue())
+        
+        if upload_success:
+            logger.info(f"Excel file exported with file number support: {fname}")
+        
         return fname if upload_success else None
         
     except Exception as e:
