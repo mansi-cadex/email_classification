@@ -62,3 +62,11 @@ test_db.py
 test.py
 test1.py
 testing.py
+
+# Ignore CSV and Excel files
+*.csv
+*.xlsx
+*.xls
+
+# Keep specific CSV files if needed
+!important_data.csv
