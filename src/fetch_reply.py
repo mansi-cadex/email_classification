@@ -246,7 +246,7 @@ class MSGraphClient:
             
             # Validate configuration
             validate_config()
-                
+            
             # Log client and tenant ID for debugging (only show first 8 chars of client_id)
             logger.debug(f"Using client_id: {self.client_id[:8]}*** and tenant_id: {self.tenant_id}")
             
@@ -257,6 +257,7 @@ class MSGraphClient:
             )
             
             # Acquire token for application permissions
+            logger.info("Attempting token acquisition...")
             result = app.acquire_token_for_client(scopes=["https://graph.microsoft.com/.default"])
             
             if "access_token" in result:
@@ -270,11 +271,15 @@ class MSGraphClient:
             else:
                 error = f"{result.get('error')}: {result.get('error_description')}"
                 logger.error(f"Error acquiring token: {error}")
+                
+                # Log full error details for debugging
+                logger.error(f"Full error result: {result}")
+                
                 raise Exception(f"Failed to acquire token: {error}")
         except Exception as e:
             logger.exception(f"Error getting access token: {str(e)}")
             raise
-    
+        
     def get_all_pages(self, url, params=None, max_items=None):
         """Yield every item in a Graph collection, following @odata.nextLink."""
         # Add params to initial URL if provided

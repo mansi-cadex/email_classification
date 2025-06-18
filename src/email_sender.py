@@ -174,7 +174,7 @@ class MSGraphAuth:
                     "token": result["access_token"],
                     "expires_at": current_time + result.get("expires_in", 3600)
                 }
-                logger.debug(f"Successfully acquired access token using application permissions")
+                logger.info("Successfully acquired access token using application permissions")
                 return result["access_token"]
             else:
                 logger.error(f"Error acquiring token: {result.get('error')}: {result.get('error_description')}")
@@ -183,7 +183,6 @@ class MSGraphAuth:
         except Exception as e:
             logger.exception(f"Error getting access token: {str(e)}")
             raise
-
 
 class EmailValidator:
     """Validates email responses and determines processing logic."""
