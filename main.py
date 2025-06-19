@@ -115,8 +115,8 @@ def main():
     logger.info(f"- MAIL_SEND_ENABLED: {os.getenv('MAIL_SEND_ENABLED', 'False')}")
     logger.info(f"- FORCE_DRAFTS: {os.getenv('FORCE_DRAFTS', 'False')}")
     logger.info(f"- SFTP_ENABLED: {os.getenv('SFTP_ENABLED', 'False')}")
-    logger.info(f"- BATCH_SIZE: {get_env_int('BATCH_SIZE', 125)}")
-    logger.info(f"- BATCH_INTERVAL: {get_env_int('BATCH_INTERVAL', 22500)} seconds")
+    logger.info(f"- BATCH_SIZE: {get_env_int('BATCH_SIZE', 20)}")
+    logger.info(f"- BATCH_INTERVAL: {get_env_int('BATCH_INTERVAL', 3600)} seconds")
     
     # Start Flask in a separate thread
     from threading import Thread
