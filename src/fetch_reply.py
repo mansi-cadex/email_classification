@@ -224,16 +224,34 @@ class ModelAPIClient:
 class MSGraphClient:
     """Microsoft Graph API client for email operations with clean text extraction."""
     
-    def __init__(self, batch_size=BATCH_SIZE):
+    def __init__(self, batch_size=BATCH_SIZE, email_address=None):
         """Initialize with credentials from environment."""
         self.base_url = MS_GRAPH_BASE_URL
         self.client_id = CLIENT_ID
         self.client_secret = CLIENT_SECRET
         self.tenant_id = TENANT_ID
-        self.email_address = EMAIL_ADDRESS
+        
+        # UPDATED: Support for multiple email addresses
+        if email_address:
+            # Single email address provided
+            self.email_addresses = [email_address]
+        else:
+            # Parse multiple email addresses from environment
+            email_env = EMAIL_ADDRESS or ""
+            if "," in email_env:
+                self.email_addresses = [email.strip() for email in email_env.split(",")]
+            else:
+                self.email_addresses = [email_env] if email_env else []
+        
+        # For backward compatibility, keep single email_address
+        self.email_address = self.email_addresses[0] if self.email_addresses else ""
+        
         self._token_cache = {"token": None, "expires_at": 0}
         self.batch_size = batch_size
         self.timeout = httpx.Timeout(MS_GRAPH_TIMEOUT)
+        
+        # Log which email addresses are being used
+        logger.info(f"MSGraphClient initialized for {len(self.email_addresses)} email(s): {self.email_addresses}")
         
     def get_access_token(self, force_refresh=False):
         """Get a valid access token, refreshing if needed."""
@@ -422,11 +440,8 @@ class MSGraphClient:
             return msg.get("bodyPreview", ""), "error_fallback", False
 
     @retry_with_backoff(max_retries=3, initial_backoff=1.5)
-    def fetch_unread_emails(self, max_emails=None) -> List[Dict]:
-        """Fetch all unread emails from inbox with clean text (no HTML, no threads)."""
-        # Use instance batch_size if none provided
-        max_emails = max_emails or self.batch_size
-        
+    def fetch_unread_emails_from_account(self, email_address: str, max_emails: int) -> List[Dict]:
+        """Fetch unread emails from a single email account."""
         # Updated parameters to fetch complete email data including headers and clean body
         params = {
             "$orderby": "receivedDateTime desc",
@@ -441,7 +456,7 @@ class MSGraphClient:
             "Authorization": f"Bearer {access_token}",
             "Content-Type": "application/json"
         }
-        url = f"{self.base_url}/users/{self.email_address}/mailFolders/inbox/messages"
+        url = f"{self.base_url}/users/{email_address}/mailFolders/inbox/messages"
         
         try:
             # Count total unread for logging - add ConsistencyLevel header for count requests
@@ -450,78 +465,115 @@ class MSGraphClient:
                 "Content-Type": "application/json",
                 "ConsistencyLevel": "eventual"
             }
-            count_url = f"{self.base_url}/users/{self.email_address}/mailFolders/inbox/messages/$count"
+            count_url = f"{self.base_url}/users/{email_address}/mailFolders/inbox/messages/$count"
             count_params = {"$filter": "isRead eq false"}
             
             count_response = httpx.get(count_url, headers=count_headers, params=count_params, timeout=self.timeout)
             total_unread = int(count_response.text) if count_response.status_code == 200 else "unknown"
-            logger.info(f"Total unread emails in inbox: {total_unread}")
+            logger.info(f"Total unread emails in inbox for {email_address}: {total_unread}")
             
             # Collect emails to process
             emails = list(self.get_all_pages(url=url, params=params, max_items=max_emails))
             
+            # Add account info to each email
+            for email in emails:
+                email["source_account"] = email_address
+            
             if not emails:
-                logger.info("No unread emails to process.")
+                logger.info(f"No unread emails to process for {email_address}.")
             else:
-                logger.info(f"Found {len(emails)} unread emails to process with clean text extraction")
+                logger.info(f"Found {len(emails)} unread emails to process for {email_address} with clean text extraction")
                 
             return emails
             
         except httpx.HTTPStatusError as e:
-            logger.error(f"HTTP error fetching emails: {e.response.status_code} - {e.response.text}")
+            logger.error(f"HTTP error fetching emails for {email_address}: {e.response.status_code} - {e.response.text}")
             return []
         except httpx.RequestError as e:
-            logger.error(f"Network error fetching emails: {str(e)}")
+            logger.error(f"Network error fetching emails for {email_address}: {str(e)}")
             return []
         except Exception as e:
-            logger.error(f"Error fetching unread emails: {str(e)}")
+            logger.error(f"Error fetching unread emails for {email_address}: {str(e)}")
             return []
+
+    @retry_with_backoff(max_retries=3, initial_backoff=1.5)
+    def fetch_unread_emails(self, emails_per_account=None) -> List[Dict]:
+        """Fetch unread emails from ALL configured email accounts."""
+        all_emails = []
+        
+        # Use provided emails_per_account or fall back to batch_size divided by accounts
+        if emails_per_account is None:
+            emails_per_account = self.batch_size // len(self.email_addresses) if self.email_addresses else self.batch_size
+        
+        logger.info(f"Fetching up to {emails_per_account} emails from each of {len(self.email_addresses)} accounts")
+        
+        for email_address in self.email_addresses:
+            try:
+                logger.info(f"Fetching emails from: {email_address}")
+                emails = self.fetch_unread_emails_from_account(email_address, emails_per_account)
+                all_emails.extend(emails)
+                logger.info(f"Collected {len(emails)} emails from {email_address}")
+            except Exception as e:
+                logger.error(f"Error fetching emails from {email_address}: {str(e)}")
+                continue
+        
+        logger.info(f"Total emails collected from all accounts: {len(all_emails)}")
+        return all_emails
     
     @retry_with_backoff(max_retries=3, initial_backoff=1.5)
-    def move_email_to_folder(self, message_id, folder_id):
+    def move_email_to_folder(self, message_id, folder_id, email_address=None):
         """Move an email to a specific folder in Outlook."""
+        # Use provided email address or fall back to first configured address
+        target_email = email_address or self.email_address
+        
         access_token = self.get_access_token()
         headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
-        endpoint = f"{self.base_url}/users/{self.email_address}/messages/{message_id}/move"
+        endpoint = f"{self.base_url}/users/{target_email}/messages/{message_id}/move"
         payload = {"destinationId": folder_id}
         
         try:
-            logger.debug(f"Attempting to move email {message_id} to folder ID: {folder_id}")
+            logger.debug(f"Attempting to move email {message_id} to folder ID: {folder_id} for {target_email}")
             response = httpx.post(endpoint, headers=headers, json=payload, timeout=self.timeout)
             response.raise_for_status()
             result = response.json()
             new_id = result.get("id", "unknown")
-            logger.info(f"Email {message_id} moved to folder ID: {folder_id}, new ID: {new_id}")
+            logger.info(f"Email {message_id} moved to folder ID: {folder_id}, new ID: {new_id} for {target_email}")
             return True, new_id
         except httpx.HTTPStatusError as e:
-            logger.warning(f"Failed to move email {message_id} to folder {folder_id}. HTTP error: {e.response.status_code} - {e.response.text}")
+            logger.warning(f"Failed to move email {message_id} to folder {folder_id} for {target_email}. HTTP error: {e.response.status_code} - {e.response.text}")
             return False, None
         except httpx.RequestError as e:
-            logger.warning(f"Network error moving email {message_id} to folder {folder_id}: {str(e)}")
+            logger.warning(f"Network error moving email {message_id} to folder {folder_id} for {target_email}: {str(e)}")
             return False, None
         except Exception as e:
-            logger.warning(f"Unexpected error moving email {message_id} to folder {folder_id}: {str(e)}")
+            logger.warning(f"Unexpected error moving email {message_id} to folder {folder_id} for {target_email}: {str(e)}")
             return False, None
     
     @retry_with_backoff(max_retries=3, initial_backoff=1.5)
-    def mark_email_read_status(self, message_id, is_read=True):
+    def mark_email_read_status(self, message_id, is_read=True, email_address=None):
         """Mark an email as read or unread."""
+        # Use provided email address or fall back to first configured address
+        target_email = email_address or self.email_address
+        
         access_token = self.get_access_token()
         headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
-        endpoint = f"{self.base_url}/users/{self.email_address}/messages/{message_id}"
+        endpoint = f"{self.base_url}/users/{target_email}/messages/{message_id}"
         payload = {"isRead": is_read}
         
         try:
             response = httpx.patch(endpoint, headers=headers, json=payload, timeout=self.timeout)
             response.raise_for_status()
-            logger.info(f"Email {message_id} marked as {'read' if is_read else 'unread'}")
+            logger.info(f"Email {message_id} marked as {'read' if is_read else 'unread'} for {target_email}")
             return True
         except Exception as e:
-            logger.warning(f"Failed to mark email {message_id} as {'read' if is_read else 'unread'}: {str(e)}")
+            logger.warning(f"Failed to mark email {message_id} as {'read' if is_read else 'unread'} for {target_email}: {str(e)}")
             return False
     
-    def ensure_classification_folders(self) -> Dict[str, str]:
+    def ensure_classification_folders(self, email_address=None) -> Dict[str, str]:
         """Ensure all classification folders exist in Outlook and return mapping."""
+        # Use provided email address or fall back to first configured address
+        target_email = email_address or self.email_address
+        
         access_token = self.get_access_token()
         headers = {
             "Authorization": f"Bearer {access_token}",
@@ -539,7 +591,7 @@ class MSGraphClient:
             """Return the first folder dict whose displayName matches `name`, or None."""
             escaped = name.replace("'", "''")
             odata = f"displayName eq '{escaped}'"
-            url = f"{self.base_url}/users/{self.email_address}/mailFolders?$filter={quote(odata)}&$select=id,parentFolderId,displayName"
+            url = f"{self.base_url}/users/{target_email}/mailFolders?$filter={quote(odata)}&$select=id,parentFolderId,displayName"
             
             r = httpx.get(url, headers=headers, timeout=self.timeout)
             r.raise_for_status()
@@ -548,13 +600,13 @@ class MSGraphClient:
             return items[0] if items else None
             
         def move_to_parent(folder_id, new_parent_id):
-            url = f"{self.base_url}/users/{self.email_address}/mailFolders/{folder_id}"
+            url = f"{self.base_url}/users/{target_email}/mailFolders/{folder_id}"
             httpx.patch(url, headers=headers,
                       json={"parentFolderId": new_parent_id}, timeout=self.timeout).raise_for_status()
         
         # Fetch all folders once with a high limit to reduce paging
         try:
-            r = httpx.get(f"{self.base_url}/users/{self.email_address}/mailFolders?$top={EMAIL_FETCH_TOP}",
+            r = httpx.get(f"{self.base_url}/users/{target_email}/mailFolders?$top={EMAIL_FETCH_TOP}",
                          headers=headers, timeout=self.timeout)
             r.raise_for_status()
             all_folders = r.json()["value"]
@@ -563,17 +615,17 @@ class MSGraphClient:
             # Ensure/create parent folder
             parent_id = lookup.get(normalize(parent_name))
             if not parent_id:
-                r = httpx.post(f"{self.base_url}/users/{self.email_address}/mailFolders",
+                r = httpx.post(f"{self.base_url}/users/{target_email}/mailFolders",
                               headers=headers,
                               json={"displayName": parent_name}, timeout=self.timeout)
                 r.raise_for_status()
                 parent_id = r.json()["id"]
-                logger.info(f"Created parent folder '{parent_name}' (ID: {parent_id})")
+                logger.info(f"Created parent folder '{parent_name}' (ID: {parent_id}) for {target_email}")
             else:
-                logger.info(f"Found parent folder '{parent_name}' (ID: {parent_id})")
+                logger.info(f"Found parent folder '{parent_name}' (ID: {parent_id}) for {target_email}")
             
             # Fetch ALL child folders with pagination support
-            child_url = f"{self.base_url}/users/{self.email_address}/mailFolders/{parent_id}/childFolders?$top=100"
+            child_url = f"{self.base_url}/users/{target_email}/mailFolders/{parent_id}/childFolders?$top=100"
             child_folders = list(self.get_all_pages(url=child_url))
             child_lookup = {normalize(f["displayName"]): f["id"] for f in child_folders}
             
@@ -588,10 +640,10 @@ class MSGraphClient:
                     if ghost:  # found elsewhere → move
                         folder_id = ghost["id"]
                         move_to_parent(folder_id, parent_id)
-                        logger.info(f"Moved ghost folder '{display}' (ID: {folder_id}) under parent.")
+                        logger.info(f"Moved ghost folder '{display}' (ID: {folder_id}) under parent for {target_email}.")
                     else:  # truly absent → create
                         try:
-                            r = httpx.post(f"{self.base_url}/users/{self.email_address}/mailFolders/{parent_id}/childFolders", 
+                            r = httpx.post(f"{self.base_url}/users/{target_email}/mailFolders/{parent_id}/childFolders", 
                                           headers=headers,
                                           json={"displayName": display}, timeout=self.timeout)
                             if r.status_code == 409:  # Handle conflict explicitly
@@ -599,28 +651,27 @@ class MSGraphClient:
                                 ghost = graph_search(display)
                                 if ghost:
                                     folder_id = ghost["id"]
-                                    logger.info(f"Folder '{display}' already exists (ID: {folder_id})")
+                                    logger.info(f"Folder '{display}' already exists (ID: {folder_id}) for {target_email}")
                                 else:
-                                    logger.warning(f"409 Conflict for '{display}' but couldn't find it via search")
+                                    logger.warning(f"409 Conflict for '{display}' but couldn't find it via search for {target_email}")
                                     continue
                             else:
                                 r.raise_for_status()
                                 folder_id = r.json()["id"]
-                                logger.info(f"Created folder '{display}' (ID: {folder_id})")
+                                logger.info(f"Created folder '{display}' (ID: {folder_id}) for {target_email}")
                         except Exception as e:
-                            logger.error(f"Error creating folder '{display}': {str(e)}")
+                            logger.error(f"Error creating folder '{display}' for {target_email}: {str(e)}")
                             continue
                             
                 folder_map[label] = folder_id
-                logger.debug(f"Mapped '{label}' → {folder_id}")
+                logger.debug(f"Mapped '{label}' → {folder_id} for {target_email}")
             
-            logger.info(f"Folder mapping ready ({len(folder_map)} folders)")
+            logger.info(f"Folder mapping ready ({len(folder_map)} folders) for {target_email}")
             return folder_map
             
         except Exception as e:
-            logger.error(f"Error ensuring classification folders: {str(e)}")
+            logger.error(f"Error ensuring classification folders for {target_email}: {str(e)}")
             return {}
-
 
 class EmailProcessor:
     """Main email processing logic for fetching, classifying, and moving emails."""
@@ -630,7 +681,7 @@ class EmailProcessor:
         self.mongo = get_mongo()
         self.model_api = ModelAPIClient()
         self.graph_client = MSGraphClient()
-        self.folder_mapping = None
+        self.folder_mappings = {}  # Store folder mappings per account
         self.batch_id = batch_id
         self.batch_size = BATCH_SIZE
         self.stop_requested = False
@@ -663,6 +714,7 @@ class EmailProcessor:
     def _process_single_email(self, msg):
         """Process a single email message – classify, store, and move to folder with clean text."""
         message_id = msg.get("id", "unknown_id")
+        source_account = msg.get("source_account", "")  # NEW: Get source account
         
         try:
             # ── 1 ▸ extract ALL metadata including headers ──────────────────────
@@ -695,8 +747,8 @@ class EmailProcessor:
             if cc_recipients:
                 recipient_emails.extend([r.get("emailAddress", {}).get("address", "") for r in cc_recipients])
 
-            logger.info("Processing email %s | From: %s | Subject: %s | Data Source: %s | Clean Text Length: %d | Had Threads: %s",
-                        message_id, sender, subject, data_source, len(clean_body), had_threads)
+            logger.info("Processing email %s | From: %s | Subject: %s | Account: %s | Data Source: %s | Clean Text Length: %d | Had Threads: %s",
+                        message_id, sender, subject, source_account, data_source, len(clean_body), had_threads)
 
             # Track clean text extraction
             if data_source.startswith("uniqueBody"):
@@ -804,6 +856,7 @@ class EmailProcessor:
                 "has_attachments":   has_attachments,
                 "data_source":       data_source,  # Track clean text source
                 "had_threads":       had_threads,  # NEW: Store thread information
+                "source_account":    source_account,  # NEW: Store source account
                 # ── NEW: File number fields for debtor contact matching ──
                 "file_numbers":      file_numbers,           # All extracted file numbers
                 "primary_file_number": primary_file_number,  # Primary file number for matching
@@ -825,6 +878,7 @@ class EmailProcessor:
                     "body_length":          len(clean_body),
                     "clean_text_source":    data_source,  # Track source of clean text
                     "had_threads":          had_threads,  # NEW: Store in metadata too
+                    "source_account":       source_account,  # NEW: Store in metadata too
                     # ── NEW: File number metadata for tracking and debugging ──
                     "file_numbers_count":   len(file_numbers),
                     "has_file_numbers":     bool(file_numbers),
@@ -882,31 +936,33 @@ class EmailProcessor:
                     message_id, data_source, had_threads, len(file_numbers))
 
             # ── 8 ▸ move to folder first ────────────────────────────────────────
-            folder_id = self.folder_mapping.get(label)
-            logger.debug("Folder mapping for '%s' → %s", label, folder_id)
+            # Get folder mapping for this specific account
+            folder_mapping = self.folder_mappings.get(source_account, {})
+            folder_id = folder_mapping.get(label)
+            logger.debug("Folder mapping for '%s' → %s (account: %s)", label, folder_id, source_account)
             
             old_id = message_id  # Store original ID before move
             
             if folder_id:
                 move_success, new_id = self.graph_client.move_email_to_folder(
-                    message_id, folder_id
+                    message_id, folder_id, email_address=source_account
                 )
                 if move_success and new_id:
-                    logger.info("Email %s moved to folder for label '%s'", message_id, label)
+                    logger.info("Email %s moved to folder for label '%s' in account %s", message_id, label, source_account)
                     self.mongo.update_message_id(old_id, new_id)
                     message_id = new_id  # Update message_id with the new ID
                     self.metrics["emails_moved"] += 1
                 else:
-                    logger.warning("Move failed for email %s (label '%s')", message_id, label)
+                    logger.warning("Move failed for email %s (label '%s') in account %s", message_id, label, source_account)
             else:
-                logger.warning("No folder mapping for label '%s'; email %s left in Inbox",
-                            label, message_id)
+                logger.warning("No folder mapping for label '%s' in account %s; email %s left in Inbox",
+                            label, source_account, message_id)
                 if logger.isEnabledFor(logging.DEBUG):
-                    logger.debug("Available folder-mapping keys: %s", list(self.folder_mapping))
+                    logger.debug("Available folder-mapping keys for %s: %s", source_account, list(folder_mapping.keys()))
 
             # ── 9 ▸ then mark read/unread in Outlook ────────────────────────────
             is_read = label not in ["manual_review", "uncategorised"]
-            self.graph_client.mark_email_read_status(message_id, is_read)  # Using the new ID if moved
+            self.graph_client.mark_email_read_status(message_id, is_read, email_address=source_account)  # Using the new ID if moved
 
             self.metrics["emails_processed"] += 1
 
@@ -934,21 +990,32 @@ class EmailProcessor:
         except Exception as e:
             logger.error(f"Error synchronizing with databases: {str(e)}")
     
-    def process_unread_emails(self) -> Tuple[bool, int, int, int]:
+    def process_unread_emails(self, emails_per_account=None) -> Tuple[bool, int, int, int]:
         """Process all unread emails in the inbox - fetch, classify, and move with clean text."""
         try:
             # Step 1: Prepare the batch
             self._prepare_batch()
             
-            # Step 2: Ensure folders for classification
-            self.folder_mapping = self.graph_client.ensure_classification_folders()
-            if not self.folder_mapping:
-                logger.error("Could not create folder mapping. Aborting.")
+            # Step 2: Ensure folders for classification FOR EACH ACCOUNT
+            logger.info("Setting up classification folders for all email accounts...")
+            for email_address in self.graph_client.email_addresses:
+                try:
+                    folder_mapping = self.graph_client.ensure_classification_folders(email_address)
+                    if folder_mapping:
+                        self.folder_mappings[email_address] = folder_mapping
+                        logger.info(f"Folder mapping ready for {email_address}: {len(folder_mapping)} folders")
+                    else:
+                        logger.error(f"Could not create folder mapping for {email_address}")
+                except Exception as e:
+                    logger.error(f"Error setting up folders for {email_address}: {str(e)}")
+            
+            if not self.folder_mappings:
+                logger.error("Could not create folder mappings for any account. Aborting.")
                 return False, 0, 0, 0
                 
-            # Step 3: Fetch unread emails with clean text
-            logger.info("Fetching unread emails with clean text extraction...")
-            emails = self.graph_client.fetch_unread_emails()
+            # Step 3: Fetch unread emails with clean text from all accounts
+            logger.info("Fetching unread emails with clean text extraction from all accounts...")
+            emails = self.graph_client.fetch_unread_emails(emails_per_account=emails_per_account)
             if not emails:
                 logger.info("No emails to process.")
                 return True, 0, 0, 0
@@ -978,13 +1045,13 @@ class EmailProcessor:
             return False, self.metrics["emails_processed"], self.metrics["emails_errored"], self.metrics["emails_classified"]
 
 
-def process_unread_emails(batch_id=None) -> Dict:
+def process_unread_emails(batch_id=None, emails_per_account=None) -> Dict:
    """Public interface function to process unread emails with clean text extraction.
    
    Returns a dictionary with processing metrics.
    """
    processor = EmailProcessor(batch_id)
-   success, processed, errors, classified = processor.process_unread_emails()
+   success, processed, errors, classified = processor.process_unread_emails(emails_per_account)
    
    return {
        "success": success,
@@ -995,85 +1062,3 @@ def process_unread_emails(batch_id=None) -> Dict:
        "clean_text_extracted": processor.metrics["clean_text_extracted"],
        "batch_id": processor.batch_id
    }
-
-
-def main():
-   """Main function to run the email processor with clean text extraction."""
-   logger.info("Starting fetch_reply.py with clean text extraction")
-   logger.info(f"Using Model API URL: {MODEL_API_URL}")
-   
-   # Log email sending configuration
-   if MAIL_SEND_ENABLED:
-       logger.warning("🚨 EMAIL SENDING IS ENABLED - RUNNING WITH MAIL_SEND_ENABLED=True")
-   else:
-       logger.info("📝 Email sending is disabled - MAIL_SEND_ENABLED=False")
-       
-   if FORCE_DRAFTS:
-       logger.info("📝 FORCE_DRAFTS is enabled - all emails will be saved as drafts")
-   
-   processor = EmailProcessor()
-   processor.stop_requested = False
-   
-   def signal_handler(sig, frame):
-       logger.info("Received interrupt signal, stopping gracefully...")
-       processor.stop_requested = True
-   
-   # Register signal handlers
-   try:
-       import signal
-       signal.signal(signal.SIGINT, signal_handler)
-       signal.signal(signal.SIGTERM, signal_handler)
-   except (ImportError, AttributeError):
-       # Windows or other platforms may not support all signals
-       pass
-       
-   success, processed, errors, classified = processor.process_unread_emails()
-   
-   # Log the outcome with clean text metrics
-   logger.info("Email Processing Summary:")
-   logger.info(f"- Emails processed: {processed}")
-   logger.info(f"- Emails classified: {classified}")
-   logger.info(f"- Emails moved: {processor.metrics['emails_moved']}")
-   logger.info(f"- Clean text extracted: {processor.metrics['clean_text_extracted']}")
-   logger.info(f"- Emails errored: {errors}")
-   logger.info(f"- Emails skipped: {processor.metrics['emails_skipped']}")
-   
-   # Process drafts and send replies if email_sender is available
-   if EMAIL_SENDER_AVAILABLE and processor.batch_id:
-       logger.info("Starting email sending/draft creation phase...")
-       
-       try:
-           # First run the draft emails processor
-           draft_success, draft_failed = process_draft_emails(processor.batch_id)
-           logger.info(f"Draft processing complete: {draft_success} created, {draft_failed} failed")
-           
-           # Then process pending emails
-           sent_success, sent_failed = send_pending_replies(processor.batch_id)
-           logger.info(f"Email sending complete: {sent_success} sent, {sent_failed} failed")
-           
-           logger.info("Email sending/draft creation phase complete")
-       except Exception as e:
-           logger.error(f"Error in email sending/draft creation phase: {str(e)}")
-   
-   # Clean up resources
-   try:
-       processor.mongo.close()
-   except Exception:
-       pass
-   
-   if success:
-       logger.info(f"fetch_reply.py execution completed successfully")
-       sys.exit(0)
-   else:
-       logger.error(f"fetch_reply.py execution completed with errors")
-       sys.exit(1)
-       
-if __name__ == "__main__":
-   try:
-       main()
-   except KeyboardInterrupt:
-       logger.info("Program interrupted by user")
-       sys.exit(0)
-   except Exception as e:
-       logger.exception("Unhandled exception in main:")
-       sys.exit(1)

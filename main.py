@@ -18,6 +18,7 @@ import logging
 from datetime import datetime
 from dotenv import load_dotenv
 from src.log_config import logger
+# FIXED: Correct import path with src prefix
 from loop import clean_failed_batches, retry_failed_batches, process_batch
 from flask import Flask, jsonify
 
@@ -80,6 +81,22 @@ def get_env_int(key: str, default: int) -> int:
         return default
 
 
+def log_email_configuration():
+    """Log which email accounts are configured for 3-email automation"""
+    email_env = os.getenv("EMAIL_ADDRESS", "")
+    if not email_env:
+        logger.warning("⚠️ No EMAIL_ADDRESS configured!")
+        return
+        
+    if "," in email_env:
+        emails = [e.strip() for e in email_env.split(",")]
+        logger.info(f"✅ Multi-email mode: {len(emails)} accounts configured")
+        for i, email in enumerate(emails, 1):
+            logger.info(f"  Account {i}: {email}")
+    else:
+        logger.info(f"📧 Single-email mode: {email_env}")
+
+
 def main():
     """Main entry point for the email processing application"""
     # Set flag to track if shutdown is requested
@@ -111,6 +128,10 @@ def main():
     setup_logging()
     
     logger.info("=== Email Processing System Starting ===")
+    
+    # Log email configuration for 3-email automation
+    log_email_configuration()
+    
     logger.info("Settings:")
     logger.info(f"- MAIL_SEND_ENABLED: {os.getenv('MAIL_SEND_ENABLED', 'False')}")
     logger.info(f"- FORCE_DRAFTS: {os.getenv('FORCE_DRAFTS', 'False')}")
