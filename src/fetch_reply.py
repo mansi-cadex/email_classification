@@ -498,26 +498,147 @@ class MSGraphClient:
 
     @retry_with_backoff(max_retries=3, initial_backoff=1.5)
     def fetch_unread_emails(self, emails_per_account=None) -> List[Dict]:
-        """Fetch unread emails from ALL configured email accounts."""
+        """    
+        Args:
+            emails_per_account: If provided, uses fixed distribution (backward compatibility)
+            
+        Returns:
+            List[Dict]: List of email messages up to batch_size total
+        """
         all_emails = []
         
-        # Use provided emails_per_account or fall back to batch_size divided by accounts
-        if emails_per_account is None:
-            emails_per_account = self.batch_size // len(self.email_addresses) if self.email_addresses else self.batch_size
+        # If emails_per_account is explicitly provided, use legacy fixed distribution
+        if emails_per_account is not None:
+            logger.info(f"Using fixed distribution: {emails_per_account} emails per account")
+            for email_address in self.email_addresses:
+                try:
+                    logger.info(f"Fetching emails from: {email_address}")
+                    emails = self.fetch_unread_emails_from_account(email_address, emails_per_account)
+                    all_emails.extend(emails)
+                    logger.info(f"Collected {len(emails)} emails from {email_address}")
+                except Exception as e:
+                    logger.error(f"Error fetching emails from {email_address}: {str(e)}")
+                    continue
+            
+            logger.info(f"Total emails collected from all accounts: {len(all_emails)}")
+            return all_emails
         
-        logger.info(f"Fetching up to {emails_per_account} emails from each of {len(self.email_addresses)} accounts")
+        # DYNAMIC DISTRIBUTION LOGIC
+        logger.info(f"Using dynamic batch distribution (batch_size: {self.batch_size})")
+        
+        # Step 1: Check email availability in each account
+        account_availability = {}
+        total_available = 0
         
         for email_address in self.email_addresses:
             try:
-                logger.info(f"Fetching emails from: {email_address}")
-                emails = self.fetch_unread_emails_from_account(email_address, emails_per_account)
+                # Get email count without fetching emails
+                access_token = self.get_access_token()
+                count_headers = {
+                    "Authorization": f"Bearer {access_token}", 
+                    "Content-Type": "application/json",
+                    "ConsistencyLevel": "eventual"
+                }
+                count_url = f"{self.base_url}/users/{email_address}/mailFolders/inbox/messages/$count"
+                count_params = {"$filter": "isRead eq false and isDraft eq false"}
+                
+                count_response = httpx.get(count_url, headers=count_headers, params=count_params, timeout=self.timeout)
+                available_count = int(count_response.text) if count_response.status_code == 200 else 0
+                
+                account_availability[email_address] = available_count
+                total_available += available_count
+                
+                logger.info(f"Account {email_address}: {available_count} unread emails available")
+                
+            except Exception as e:
+                logger.warning(f"Could not check email count for {email_address}: {str(e)}")
+                account_availability[email_address] = 0
+        
+        logger.info(f"Total unread emails across all accounts: {total_available}")
+        
+        # Step 2: Calculate dynamic distribution
+        if total_available == 0:
+            logger.info("No unread emails found in any account.")
+            return all_emails
+        
+        # Determine how many emails to process (up to batch_size)
+        emails_to_process = min(self.batch_size, total_available)
+        logger.info(f"Will process {emails_to_process} emails (batch_size: {self.batch_size}, available: {total_available})")
+        
+        # Step 3: Sort accounts by email count (descending) for priority processing
+        sorted_accounts = sorted(
+            account_availability.items(), 
+            key=lambda x: x[1], 
+            reverse=True
+        )
+        
+        # Step 4: Distribute emails_to_process across accounts based on availability
+        distribution_plan = {}
+        remaining_to_fetch = emails_to_process
+        
+        for email_address, available_count in sorted_accounts:
+            if remaining_to_fetch <= 0 or available_count <= 0:
+                distribution_plan[email_address] = 0
+                continue
+                
+            # Calculate fair share based on availability ratio
+            if total_available > 0:
+                proportional_share = int((available_count / total_available) * emails_to_process)
+                # Take minimum of proportional share, available emails, and remaining to fetch
+                to_fetch = min(proportional_share, available_count, remaining_to_fetch)
+                
+                # Ensure we don't leave small amounts unfetched if this is the last account with emails
+                if remaining_to_fetch <= 5 and available_count >= remaining_to_fetch:
+                    to_fetch = remaining_to_fetch
+                    
+            else:
+                to_fetch = 0
+                
+            distribution_plan[email_address] = to_fetch
+            remaining_to_fetch -= to_fetch
+        
+        # Step 5: If we still have remaining capacity, distribute to accounts with most emails
+        while remaining_to_fetch > 0:
+            allocated = False
+            for email_address, available_count in sorted_accounts:
+                current_allocation = distribution_plan[email_address]
+                if current_allocation < available_count and remaining_to_fetch > 0:
+                    distribution_plan[email_address] += 1
+                    remaining_to_fetch -= 1
+                    allocated = True
+                    
+            # Prevent infinite loop if no more emails can be allocated
+            if not allocated:
+                break
+        
+        # Log the distribution plan
+        logger.info("Dynamic distribution plan:")
+        for email_address, to_fetch in distribution_plan.items():
+            available = account_availability[email_address]
+            logger.info(f"  {email_address}: {to_fetch}/{available} emails")
+        
+        # Step 6: Fetch emails according to the distribution plan
+        total_fetched = 0
+        for email_address in self.email_addresses:
+            emails_to_fetch = distribution_plan.get(email_address, 0)
+            
+            if emails_to_fetch <= 0:
+                logger.info(f"Skipping {email_address}: no emails to fetch")
+                continue
+                
+            try:
+                logger.info(f"Fetching {emails_to_fetch} emails from: {email_address}")
+                emails = self.fetch_unread_emails_from_account(email_address, emails_to_fetch)
                 all_emails.extend(emails)
-                logger.info(f"Collected {len(emails)} emails from {email_address}")
+                total_fetched += len(emails)
+                
+                logger.info(f"Collected {len(emails)}/{emails_to_fetch} emails from {email_address}")
+                
             except Exception as e:
                 logger.error(f"Error fetching emails from {email_address}: {str(e)}")
                 continue
         
-        logger.info(f"Total emails collected from all accounts: {len(all_emails)}")
+        logger.info(f"Dynamic batch complete: {total_fetched} emails collected from {len(self.email_addresses)} accounts")
         return all_emails
     
     @retry_with_backoff(max_retries=3, initial_backoff=1.5)
