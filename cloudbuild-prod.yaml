@@ -1,0 +1,45 @@
+steps:
+# Build the container image
+- name: 'gcr.io/cloud-builders/docker'
+  args: ['build', '-t', 'us-central1-docker.pkg.dev/dandsltd-gce/email-classification/prod:$COMMIT_SHA', '.']
+
+# Push the container image to Artifact Registry
+- name: 'gcr.io/cloud-builders/docker'
+  args: ['push', 'us-central1-docker.pkg.dev/dandsltd-gce/email-classification/prod:$COMMIT_SHA']
+
+# Authenticate to GKE
+- name: 'gcr.io/cloud-builders/gke-deploy'
+  entrypoint: 'bash'
+  args:
+  - '-c'
+  - |
+    gcloud container clusters get-credentials o2c-dandsltd-gce-us-central1-prod-gke --region us-central1 --project dandsltd-gce
+
+# Update deployment with new image
+- name: 'gcr.io/cloud-builders/kubectl'
+  env:
+  - 'CLOUDSDK_COMPUTE_REGION=us-central1'
+  - 'CLOUDSDK_CONTAINER_CLUSTER=o2c-dandsltd-gce-us-central1-prod-gke'
+  args:
+  - 'set'
+  - 'image'
+  - 'deployment/email-classification'
+  - 'email-classification=us-central1-docker.pkg.dev/dandsltd-gce/email-classification/prod:$COMMIT_SHA'
+  - '-n'
+  - 'production'
+
+# Tag the image with 'latest'
+- name: 'gcr.io/cloud-builders/docker'
+  args: ['tag', 'us-central1-docker.pkg.dev/dandsltd-gce/email-classification/prod:$COMMIT_SHA', 'us-central1-docker.pkg.dev/dandsltd-gce/email-classification/prod:latest']
+
+# Push the 'latest' tag
+- name: 'gcr.io/cloud-builders/docker'
+  args: ['push', 'us-central1-docker.pkg.dev/dandsltd-gce/email-classification/prod:latest']
+
+images:
+- 'us-central1-docker.pkg.dev/dandsltd-gce/email-classification/prod:$COMMIT_SHA'
+- 'us-central1-docker.pkg.dev/dandsltd-gce/email-classification/prod:latest'
+
+timeout: '1800s'
+options:
+  logging: CLOUD_LOGGING_ONLY

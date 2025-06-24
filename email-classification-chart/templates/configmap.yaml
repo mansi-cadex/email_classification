@@ -1,0 +1,34 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: email-classification-config
+  namespace: {{ .Values.namespace }}
+data:
+  PYTHONUNBUFFERED: {{ .Values.config.pythonUnbuffered | quote }}
+  PYTHONDONTWRITEBYTECODE: {{ .Values.config.pythonDontWriteBytecode | quote }}
+  PYTHONPATH: {{ .Values.config.pythonPath | quote }}
+  LOG_LEVEL: {{ .Values.config.logLevel | quote }}
+  LOG_DIR: {{ .Values.config.logDir | quote }}
+  BATCH_SIZE: {{ .Values.config.batchSize | quote }}
+  MAX_RETRIES: {{ .Values.config.maxRetries | quote }}
+  RETRY_DELAY: {{ .Values.config.retryDelay | quote }}
+  MAIL_SEND_ENABLED: {{ .Values.config.mailSendEnabled | quote }}
+  FORCE_DRAFTS: {{ .Values.config.forceDrafts | quote }}
+  MS_GRAPH_TIMEOUT: {{ .Values.config.msGraphTimeout | quote }}
+  ADD_EMAIL_FOOTER: {{ .Values.config.addEmailFooter | quote }}
+  YOUR_DOMAIN: {{ .Values.config.yourDomain | quote }}
+  TIME_FILTER_HOURS: {{ .Values.config.timeFilterHours | quote }}
+  EMAIL_FETCH_TOP: {{ .Values.config.emailFetchTop | quote }}
+  DB_HOST: {{ .Values.config.dbHost | quote }}
+  DB_PORT: {{ .Values.config.dbPort | quote }}
+  DB_NAME: {{ .Values.config.dbName | quote }}
+  DB_SCHEMA: {{ .Values.config.dbSchema | quote }}
+  DB_TYPE: {{ .Values.config.dbType | quote }}
+  MONGO_DB: {{ .Values.config.mongoDb | quote }}
+  MONGO_COLLECTION: {{ .Values.config.mongoCollection | quote }}
+  SFTP_HOST: {{ .Values.config.sftpHost | quote }}
+  SFTP_PORT: {{ .Values.config.sftpPort | quote }}
+  SFTP_ENABLED: {{ .Values.config.sftpEnabled | quote }}
+  MODEL_API_URL: {{ .Values.config.modelApiUrl | quote }}
+  BATCH_INTERVAL: {{ .Values.config.batchInterval | quote }}
+  BATCH_TIMEOUT: {{ .Values.config.batchTimeout | quote }} 
