@@ -822,14 +822,12 @@ def process_batch(batch_id: Optional[str] = None) -> Tuple[bool, int, int, int]:
             logger.error("Failed to create batch in PostgreSQL")
             return False, 0, 0, 0
     
-    # UPDATED: Calculate emails per account for 3-email support
+    # Use dynamic distribution for optimal batch utilization
     email_addresses_env = os.getenv("EMAIL_ADDRESS", "")
     if "," in email_addresses_env:
         email_addresses = [email.strip() for email in email_addresses_env.split(",")]
-        emails_per_account = BATCH_SIZE // len(email_addresses)
-        logger.info(f"Processing batch {batch_id} (max {BATCH_SIZE} total: {emails_per_account} per account × {len(email_addresses)} accounts)")
+        logger.info(f"Processing batch {batch_id} with dynamic distribution (max {BATCH_SIZE} total across {len(email_addresses)} accounts)")
     else:
-        emails_per_account = BATCH_SIZE
         logger.info(f"Processing batch {batch_id} (max {BATCH_SIZE} from single account)")
     
     logger.info(f"Mail sending is {'ENABLED' if MAIL_SEND_ENABLED else 'DISABLED'}, Force drafts is {'ENABLED' if FORCE_DRAFTS else 'DISABLED'}")
@@ -842,8 +840,8 @@ def process_batch(batch_id: Optional[str] = None) -> Tuple[bool, int, int, int]:
         return False, 0, 0, 0
 
     try:
-        # UPDATED: Pass emails_per_account to process_unread_emails
-        email_result = process_unread_emails(batch_id, emails_per_account=emails_per_account)
+        # Use dynamic distribution for optimal batch utilization
+        email_result = process_unread_emails(batch_id)
         
         if not email_result["success"]:
             logger.error(f"Batch {batch_id} failed during email processing: {email_result}")
