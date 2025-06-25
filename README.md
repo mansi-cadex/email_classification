@@ -34,18 +34,7 @@ email_classification/
    - Parses command-line arguments
    - Starts the appropriate processing mode
    - Handles graceful shutdown and error reporting
-
-HEAD
-email_classification/
-├── src/
-│   ├── fetch_reply.py        # Email fetching and processing
-│   ├── email_sender.py       # Email sending and draft creation
-│   ├── db.py                 # Database connections (MongoDB and PostgreSQL)
-│   ├── log_config.py         # Logging configuration
-├── loop.py                   # Batch processing and orchestration
-├── main.py                   # Application entry point
-
-
+   - 
 2. **src/fetch_reply.py**: Email fetching and classification
    - Connects to Microsoft Graph API for email access
    - Fetches unread emails from the inbox
