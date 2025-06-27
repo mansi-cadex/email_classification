@@ -444,7 +444,7 @@ class MSGraphClient:
         """Fetch unread emails from a single email account."""
         # Updated parameters to fetch complete email data including headers and clean body
         params = {
-            "$orderby": "receivedDateTime desc",
+            "$orderby": "receivedDateTime asc",
             "$filter": "isRead eq false and isDraft eq false",
             "$select": "id,subject,from,body,bodyPreview,uniqueBody,receivedDateTime,hasAttachments,toRecipients,ccRecipients,internetMessageHeaders,conversationId",
             "$top": max_emails
