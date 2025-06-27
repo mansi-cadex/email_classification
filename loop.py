@@ -325,7 +325,6 @@ def upload_to_sftp(filename: str, file_content: Optional[bytes] = None,
     logger.error(f"Failed to upload {filename} to SFTP after {max_retries} attempts")
     return False
 
-
 def extract_contact_info(email_doc: Dict) -> Dict:
     """Extract contact information with file number support for debtor matching."""
     
@@ -367,17 +366,23 @@ def extract_contact_info(email_doc: Dict) -> Dict:
     
     # ── 2 ▸ Determine debtor matching strategy based on file numbers ─────────
     sender_email = email_doc.get("sender", "")
+    message_id = email_doc.get("message_id", "unknown")
     
     if primary_file_number:
         # Primary strategy: Use file number for ABCC debtor lookup
         contact_info["debtor_matching_key"] = primary_file_number
         contact_info["debtor_matching_strategy"] = "file_number_primary"
-        logger.info(f"Email will use file number '{primary_file_number}' for debtor contact matching")
+        logger.info(f"Email {message_id} will use file number '{primary_file_number}' for debtor contact matching")
+        
+        # ENHANCED: Log file number source for debugging
+        file_number_source = email_doc.get("metadata", {}).get("file_number_source", "unknown")
+        logger.info(f"Email {message_id} file number source: {file_number_source}")
+        
     else:
         # Fallback strategy: Use email address for ABCC debtor lookup
         contact_info["debtor_matching_key"] = sender_email
         contact_info["debtor_matching_strategy"] = "email_fallback"
-        logger.debug(f"Email will use email address '{sender_email}' for debtor contact matching (no file number found)")
+        logger.debug(f"Email {message_id} will use email address '{sender_email}' for debtor contact matching (no file number found)")
     
     # ── 3 ▸ Extract entities for contact information (existing logic) ────────
     entities = email_doc.get("entities", {})
@@ -503,12 +508,19 @@ def extract_contact_info(email_doc: Dict) -> Dict:
         # Service accounts should always remain active
         contact_info["contact_status"] = "service_account"
     
-    # ── 5 ▸ Log file number extraction results for debugging ─────────────────
+    # ── 5 ▸ ENHANCED: Log file number extraction results for debugging ─────────────────
     if file_numbers:
-        logger.info(f"File number extraction complete: {len(file_numbers)} numbers found, "
-                   f"primary: '{primary_file_number}', strategy: {contact_info['debtor_matching_strategy']}")
+        subject_numbers = email_doc.get("metadata", {}).get("subject_file_numbers", [])
+        model_numbers = email_doc.get("metadata", {}).get("model_file_numbers", [])
+        
+        logger.info(f"Email {message_id} file number extraction complete:")
+        logger.info(f"  - Total numbers found: {len(file_numbers)}")
+        logger.info(f"  - From subject: {subject_numbers}")
+        logger.info(f"  - From model: {model_numbers}")
+        logger.info(f"  - Primary selected: '{primary_file_number}'")
+        logger.info(f"  - Matching strategy: {contact_info['debtor_matching_strategy']}")
     else:
-        logger.debug(f"No file numbers found in email, using email fallback strategy")
+        logger.debug(f"Email {message_id} contains no file numbers - using email fallback strategy")
         
     return contact_info
 

@@ -837,6 +837,24 @@ class EmailProcessor:
         message_id = msg.get("id", "unknown_id")
         source_account = msg.get("source_account", "")  # NEW: Get source account
         
+        def extract_file_numbers_from_subject(subject):
+            """Extract file numbers only from email subject line"""
+            import re
+            
+            patterns = [
+                r'#(\d{7,8})',               # #2943598
+                r'file\s*#?\s*(\d{7,8})',    # file #2943598 or file 2943598
+                r'account\s*#?\s*(\d{7,8})', # account #2943598
+                r'ref\s*#?\s*(\d{7,8})'      # ref #2943598
+            ]
+            
+            file_numbers = []
+            for pattern in patterns:
+                matches = re.findall(pattern, subject.lower())
+                file_numbers.extend(matches)
+            
+            return list(dict.fromkeys(file_numbers))  # Remove duplicates
+        
         try:
             # ── 1 ▸ extract ALL metadata including headers ──────────────────────
             sender_info = msg.get("from", {}).get("emailAddress", {})
@@ -912,16 +930,25 @@ class EmailProcessor:
 
             entities = classification_result.get("entities", {})
 
-            # ── 3.5 ▸ extract and process file numbers for debtor contact matching ──
-            file_numbers = entities.get("file_numbers", [])
-            primary_file_number = file_numbers[0] if file_numbers else None
+            # ── 3.5 ▸ ENHANCED FILE NUMBER EXTRACTION WITH SUBJECT PRIORITY ──
+            subject_file_numbers = extract_file_numbers_from_subject(subject)
+            model_file_numbers = entities.get("file_numbers", [])
             
-            # Log file number extraction for debugging
-            if file_numbers:
-                logger.info("Email %s contains file numbers: %s | Primary: %s", 
-                        message_id, file_numbers, primary_file_number)
+            if subject_file_numbers:
+                # Prioritize subject line file numbers
+                file_numbers = subject_file_numbers
+                primary_file_number = subject_file_numbers[0]
+                logger.info("Email %s using file number from subject: %s (subject priority)", 
+                        message_id, primary_file_number)
             else:
-                logger.debug("Email %s contains no file numbers - will use email-based matching", message_id)
+                # Fallback to model extraction
+                file_numbers = model_file_numbers
+                primary_file_number = file_numbers[0] if file_numbers else None
+                if primary_file_number:
+                    logger.info("Email %s using file number from model: %s (model fallback)", 
+                            message_id, primary_file_number)
+                else:
+                    logger.debug("Email %s contains no file numbers - will use email-based matching", message_id)
 
             # ── 4 ▸ generate a reply if needed ──────────────────────────────────
             reply_text = ""
@@ -1000,14 +1027,17 @@ class EmailProcessor:
                     "clean_text_source":    data_source,  # Track source of clean text
                     "had_threads":          had_threads,  # NEW: Store in metadata too
                     "source_account":       source_account,  # NEW: Store in metadata too
-                    # ── NEW: File number metadata for tracking and debugging ──
+                    # ── NEW: Enhanced file number metadata for tracking and debugging ──
                     "file_numbers_count":   len(file_numbers),
                     "has_file_numbers":     bool(file_numbers),
                     "primary_file_number":  primary_file_number,
                     "all_file_numbers":     file_numbers,
+                    "subject_file_numbers": subject_file_numbers,
+                    "model_file_numbers":   model_file_numbers,
                     # ── NEW: Debtor contact matching strategy ──
                     "debtor_matching_strategy": "file_number_primary" if primary_file_number else "email_fallback",
                     "debtor_matching_key":      primary_file_number or sender,
+                    "file_number_source":       "subject_priority" if subject_file_numbers else "model_entities"
                 },
             }
 
@@ -1031,23 +1061,16 @@ class EmailProcessor:
                 }
 
             # ── NEW: Enhanced file number info in metadata for debugging ──
-            if file_numbers:
-                email_data["metadata"]["file_number_extraction"] = {
-                    "extracted_count": len(file_numbers),
-                    "all_numbers": file_numbers,
-                    "primary_number": primary_file_number,
-                    "extraction_source": "entities_api_response",
-                    "will_use_for_matching": True
-                }
-            else:
-                email_data["metadata"]["file_number_extraction"] = {
-                    "extracted_count": 0,
-                    "all_numbers": [],
-                    "primary_number": None,
-                    "extraction_source": "none_found",
-                    "will_use_for_matching": False,
-                    "fallback_to": "email_address"
-                }
+            email_data["metadata"]["file_number_extraction"] = {
+                "extracted_count": len(file_numbers),
+                "all_numbers": file_numbers,
+                "primary_number": primary_file_number,
+                "subject_numbers": subject_file_numbers,
+                "model_numbers": model_file_numbers,
+                "extraction_source": "subject_priority" if subject_file_numbers else ("model_entities" if model_file_numbers else "none_found"),
+                "will_use_for_matching": bool(primary_file_number),
+                "fallback_to": "email_address" if not primary_file_number else None
+            }
 
             # ── 7 ▸ insert in Mongo ─────────────────────────────────────────────
             result = self.mongo.insert_email(email_data)
