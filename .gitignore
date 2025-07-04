@@ -1,8 +1,12 @@
-# Python
+# Python cache and compiled files
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
+*.pyc
+*.pyo
+
+# Distribution / packaging
 .Python
 build/
 develop-eggs/
@@ -16,34 +20,49 @@ parts/
 sdist/
 var/
 wheels/
+pip-wheel-metadata/
+share/python-wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+MANIFEST
 
-# Virtual Environment
+# Virtual Environment (CRITICAL - Never commit these!)
 venv/
-ENV/
 env/
+ENV/
+.venv/
+.ENV/
+pyvenv.cfg
 
-# IDE
+# IDE files
 .idea/
 .vscode/
 *.swp
 *.swo
+*.sublime-project
+*.sublime-workspace
 
 # Logs
 logs/
 *.log
+email_processor.log
+mail_move.log
 
-# Local development settings
+# Environment variables
+.env
 .env.local
+.env.development
+.env.test
+.env.production
 .env.development.local
 .env.test.local
 .env.production.local
 
-# Database
+# Database files
 *.sqlite3
 *.db
+*.sqlite
 
 # OS generated files
 .DS_Store
@@ -52,21 +71,81 @@ logs/
 .Spotlight-V100
 .Trashes
 ehthumbs.db
-Thumbs.db 
+Thumbs.db
+desktop.ini
 
-# Docker
-docker-compose.yml
-
-# Test files
+# Test and temporary files
 test_db.py
 test.py
 test1.py
 testing.py
+body.py
+check.py
 
-# Ignore CSV and Excel files
+# Data files (CSV, Excel, etc.)
 *.csv
 *.xlsx
 *.xls
+*.json
+clean_emails_*.csv
+final_classification_*.csv
 
-# Keep specific CSV files if needed
-!important_data.csv
+# Backup files
+*.bak
+*.backup
+*~
+
+# Docker override files (keep base docker files)
+docker-compose.override.yml
+docker-compose.local.yml
+
+# Jupyter Notebooks
+*.ipynb
+.ipynb_checkpoints/
+
+# Coverage reports
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+
+# Translations
+*.mo
+*.pot
+
+# Scrapy stuff
+.scrapy
+
+# Sphinx documentation
+docs/_build/
+
+# PyBuilder
+target/
+
+# Celery stuff
+celerybeat-schedule
+celerybeat.pid
+
+# SageMath parsed files
+*.sage.py
+
+# Spyder project settings
+.spyderproject
+.spyproject
+
+# Rope project settings
+.ropeproject
+
+# mkdocs documentation
+/site
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
