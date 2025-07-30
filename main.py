@@ -1,212 +1,212 @@
 #!/usr/bin/env python3
 """
-main.py - Application entry point for the Email Classification System
+main.py - Simple application entry point for the Email Classification System
 
-This module serves as the main entry point for the email classification system.
-It handles:
-1. Initializing logging
-2. Parsing command-line arguments
-3. Starting the main email processing loop
-4. Graceful shutdown and error reporting
+Clean entry point that just starts the system and handles shutdown.
+All batch logic is in loop.py where it belongs.
 """
 
 import os
 import sys
-import time
 import signal
+import threading
 import logging
-from datetime import datetime
 from dotenv import load_dotenv
-from src.log_config import logger
-# FIXED: Correct import path with src prefix
-from loop import clean_failed_batches, retry_failed_batches, process_batch
 from flask import Flask, jsonify
-
-# Initialize Flask app
-app = Flask(__name__)
-
-@app.route('/health')
-def health_check():
-    """Health check endpoint for Docker"""
-    return jsonify({"status": "healthy"}), 200
-
-# Emergency exit handler - will force exit immediately
-def emergency_exit(signum, frame):
-    print("\nEmergency exit triggered. Terminating immediately...")
-    os._exit(1)  # Force exit without cleanup
-
-
-# Register emergency exit for Ctrl+\
-signal.signal(signal.SIGQUIT, emergency_exit)
-
+from flask_cors import CORS  # Add this import
+from threading import Thread
 
 # Load environment variables
 load_dotenv()
 
+# Import after loading environment
+from src.log_config import logger
+from loop import run_email_processor
 
-def setup_logging():
-    """Configure logging for the application"""
-    log_level = os.getenv("LOG_LEVEL", "INFO")
-    log_format = '%(asctime)s [%(levelname)s] %(name)s: %(message)s'
-    
-    log_dir = os.getenv("LOG_DIR", "logs")
-    if not os.path.exists(log_dir):
-        try:
-            os.makedirs(log_dir, exist_ok=True)
-        except:
-            log_dir = "."
-    
-    log_file = os.path.join(log_dir, 'email_processor.log')
-    
-    logging.basicConfig(
-        level=getattr(logging, log_level),
-        format=log_format,
-        handlers=[
-            logging.StreamHandler(),
-            logging.FileHandler(log_file)
-        ]
-    )
-    logger.info(f"Logging initialized at {log_level} level")
+# Initialize Flask app for health checks
+app = Flask(__name__)
 
+# Enable CORS for all routes - THIS FIXES THE ERROR
+CORS(app, origins="*")  # Allow all origins, or specify your domain
 
-def get_env_int(key: str, default: int) -> int:
-    """Safely get integer from environment variable."""
-    value = os.getenv(key, str(default))
-    # Remove any comments and whitespace
-    value = value.split('#')[0].strip()
+# Simple global state for processor control
+processor_running = False
+processor_thread = None
+stop_event = threading.Event()
+
+# In-memory log capture for API endpoint
+class LogCapture(logging.Handler):
+    def __init__(self):
+        super().__init__()
+        self.log_buffer = []
+        self.max_logs = 1000  # Keep last 1000 log entries
+    
+    def emit(self, record):
+        log_entry = self.format(record)
+        self.log_buffer.append(log_entry)
+        if len(self.log_buffer) > self.max_logs:
+            self.log_buffer.pop(0)  # Remove oldest entry
+
+# Add log capture handler
+log_capture = LogCapture()
+log_capture.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+logger.addHandler(log_capture)
+
+@app.route('/health')
+def health_check():
+    """Health check endpoint for Docker"""
+    return jsonify({"status": "healthy", "processor_running": processor_running}), 200
+
+@app.route('/start')
+@app.route('/start/<int:batch_size>')
+def start_processor(batch_size=None):
+    """Start email processor with optional batch size"""
+    global processor_running, processor_thread
+    
+    # Check if thread is actually running
+    if processor_thread and processor_thread.is_alive():
+        return jsonify({"success": False, "message": "Already running"}), 400
+    
     try:
-        return int(value)
-    except ValueError:
-        logger.warning(f"Invalid value for {key}: '{value}'. Using default: {default}")
-        return default
-
-
-def log_email_configuration():
-    """Log which email accounts are configured for 3-email automation"""
-    email_env = os.getenv("EMAIL_ADDRESS", "")
-    if not email_env:
-        logger.warning("⚠️ No EMAIL_ADDRESS configured!")
-        return
+        # Clean up stop signal file if it exists
+        try:
+            os.remove("/tmp/stop_email_processor")
+        except:
+            pass
         
-    if "," in email_env:
-        emails = [e.strip() for e in email_env.split(",")]
-        logger.info(f"✅ Multi-email mode: {len(emails)} accounts configured")
-        for i, email in enumerate(emails, 1):
-            logger.info(f"  Account {i}: {email}")
-    else:
-        logger.info(f"📧 Single-email mode: {email_env}")
-
-
-def main():
-    """Main entry point for the email processing application"""
-    # Set flag to track if shutdown is requested
-    shutdown_requested = False
-    
-    # Define signal handler for graceful shutdown
-    def signal_handler(sig, frame):
-        nonlocal shutdown_requested
-        signal_name = "SIGINT" if sig == signal.SIGINT else "SIGTERM"
-        logger.info(f"Received {signal_name}, initiating graceful shutdown...")
-        shutdown_requested = True
-        
-        # Set a timeout to force exit if graceful shutdown takes too long
-        def force_exit():
-            logger.warning("Graceful shutdown is taking too long. Forcing exit...")
-            os._exit(1)
+        # Set batch size in environment if provided
+        if batch_size:
+            os.environ['RUNTIME_BATCH_SIZE'] = str(batch_size)
+            logger.info(f"Starting processor with custom batch size: {batch_size}")
+        else:
+            # Remove any existing runtime batch size
+            if 'RUNTIME_BATCH_SIZE' in os.environ:
+                del os.environ['RUNTIME_BATCH_SIZE']
             
-        # Schedule force exit after 5 seconds
-        signal.alarm(5)
+        stop_event.clear()
+        processor_thread = Thread(target=run_email_processor)
+        processor_thread.daemon = True
+        processor_thread.start()
+        processor_running = True
+        
+        effective_batch_size = batch_size or int(os.getenv("BATCH_SIZE", 120))
+        return jsonify({
+            "success": True, 
+            "message": f"Email processor started with batch size: {effective_batch_size}"
+        })
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+
+@app.route('/stop')
+def stop_processor():
+    """Stop email processor"""
+    global processor_running
     
-    # Register handlers for SIGINT (Ctrl+C) and SIGTERM
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
+    # Check if thread is actually running
+    if not processor_thread or not processor_thread.is_alive():
+        processor_running = False  # Sync the flag
+        return jsonify({"success": False, "message": "Not running"}), 400
     
-    # Register SIGALRM to force exit
-    signal.signal(signal.SIGALRM, lambda sig, frame: os._exit(1))
+    try:
+        # Create stop signal file
+        with open("/tmp/stop_email_processor", "w") as f:
+            f.write("stop")
+        
+        processor_running = False
+        logger.info("Stop signal sent to email processor")
+        
+        return jsonify({"success": True, "message": "Stop signal sent - processor will stop after current batch"})
+        
+    except Exception as e:
+        logger.error(f"Error stopping processor: {str(e)}")
+        return jsonify({"success": False, "message": str(e)}), 500
+
+@app.route('/status')
+def get_status():
+    """Get actual processor status"""
+    thread_alive = processor_thread and processor_thread.is_alive()
+    return jsonify({
+        "processor_running_flag": processor_running,
+        "thread_actually_running": thread_alive,
+        "stop_file_exists": os.path.exists("/tmp/stop_email_processor")
+    })
     
-    # Initialize logging
-    setup_logging()
-    
+@app.route('/logs')
+def get_logs():
+    """Get all logs from memory with proper line breaks"""
+    try:
+        # Return logs as plain text with proper line breaks instead of JSON array
+        formatted_logs = "\n".join(log_capture.log_buffer)
+        return formatted_logs, 200, {'Content-Type': 'text/plain'}
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+
+def log_startup_config():
+    """Log startup configuration"""
     logger.info("=== Email Processing System Starting ===")
     
-    # Log email configuration for 3-email automation
-    log_email_configuration()
+    # Log model configuration  
+    model_url = os.getenv("MODEL_API_URL", "http://34.72.113.155:8000")
+    logger.info(f"Model API URL: {model_url}")
+    
+    # Log email configuration
+    email_env = os.getenv("EMAIL_ADDRESS", "")
+    if email_env:
+        if "," in email_env:
+            emails = [e.strip() for e in email_env.split(",")]
+            logger.info(f"Multi-email mode: {len(emails)} accounts configured")
+        else:
+            logger.info(f"Single-email mode: {email_env}")
+    else:
+        logger.warning("No EMAIL_ADDRESS configured!")
+    
+    # Log key settings - CORRECT VALUES from .env
+    batch_size = os.getenv("BATCH_SIZE", "50")
+    batch_interval = os.getenv("BATCH_INTERVAL_MINUTES", "10")
     
     logger.info("Settings:")
     logger.info(f"- MAIL_SEND_ENABLED: {os.getenv('MAIL_SEND_ENABLED', 'False')}")
-    logger.info(f"- FORCE_DRAFTS: {os.getenv('FORCE_DRAFTS', 'False')}")
+    logger.info(f"- FORCE_DRAFTS: {os.getenv('FORCE_DRAFTS', 'True')}")
     logger.info(f"- SFTP_ENABLED: {os.getenv('SFTP_ENABLED', 'False')}")
-    logger.info(f"- BATCH_SIZE: {get_env_int('BATCH_SIZE', 20)}")
-    logger.info(f"- BATCH_INTERVAL: {get_env_int('BATCH_INTERVAL', 3600)} seconds")
+    logger.info(f"- BATCH_SIZE: {batch_size}")
+    logger.info(f"- BATCH_INTERVAL: {batch_interval} minutes")
+
+def setup_signal_handlers():
+    """Setup graceful shutdown signal handlers"""
+    def signal_handler(sig, frame):
+        signal_name = "SIGINT" if sig == signal.SIGINT else "SIGTERM"
+        logger.info(f"Received {signal_name}, shutting down gracefully...")
+        global processor_running
+        if processor_running:
+            stop_event.set()
+            processor_running = False
+        
+        sys.exit(0)
     
-    # Start Flask in a separate thread
-    from threading import Thread
-    flask_thread = Thread(target=lambda: app.run(host='0.0.0.0', port=5000))
-    flask_thread.daemon = True
-    flask_thread.start()
-    
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+def main():
+    """Main entry point - wait for commands"""
     try:
-        # Clean up existing failed batches
-        if not shutdown_requested:
-            clean_failed_batches()
+        # Setup
+        setup_signal_handlers()
+        log_startup_config()
         
-        # Retry any failed batches
-        if not shutdown_requested:
-            retry_failed_batches()
+        logger.info("System ready - waiting for /start command")
+        logger.info("Control endpoints: /start /stop /logs /health")
+        logger.info("CORS enabled for cross-origin requests")
         
-        # Start the main processing loop
-        if not shutdown_requested:
-            logger.info("Starting main email processing loop")
-            
-            # Get batch interval from environment or use default
-            batch_interval = get_env_int('BATCH_INTERVAL', 300)
-            
-            while not shutdown_requested:
-                # Process a batch
-                start_time = datetime.now()
-                logger.info(f"Starting batch at {start_time.isoformat()}")
-                
-                # Run a single batch
-                try:
-                    # Run a single batch if not shutting down
-                    if not shutdown_requested:
-                        process_batch()
-                        
-                    # Calculate time until next batch
-                    elapsed = (datetime.now() - start_time).total_seconds()
-                    wait_time = max(0, batch_interval - elapsed)
-                    
-                    # Log time until next batch
-                    if not shutdown_requested:
-                        logger.info(f"Batch complete. Next batch in {wait_time:.1f} seconds")
-                    
-                    # Wait until next batch, checking for shutdown frequently
-                    for _ in range(int(wait_time)):
-                        if shutdown_requested:
-                            break
-                        time.sleep(1)
-                        
-                except Exception as e:
-                    logger.error(f"Error processing batch: {str(e)}", exc_info=True)
-                    # Wait a bit but still check for shutdown
-                    for _ in range(min(60, batch_interval)):
-                        if shutdown_requested:
-                            break
-                        time.sleep(1)
-                
-                # Exit the loop if shutdown was requested
-                if shutdown_requested:
-                    break
-    
+        # Start Flask and wait for commands (NO auto-start)
+        app.run(host='0.0.0.0', port=5000, debug=False)
+        
     except KeyboardInterrupt:
-        logger.info("Shutdown requested (KeyboardInterrupt)")
+        logger.info("Shutdown requested")
     except Exception as e:
-        logger.error(f"Unexpected error in main process: {str(e)}", exc_info=True)
+        logger.error(f"Fatal error: {str(e)}", exc_info=True)
+        sys.exit(1)
     finally:
         logger.info("=== Email Processing System Shutdown ===")
-        # Force exit after logging shutdown message
-        os._exit(0)
-
 
 if __name__ == "__main__":
     main()
