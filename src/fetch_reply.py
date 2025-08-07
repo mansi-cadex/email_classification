@@ -708,13 +708,13 @@ class EmailProcessor:
             except Exception as e:
                 logger.warning(f"Failed to move email: {e}")
         
-        # ✅ Mark as read using the correct message ID - LIKE TEST CODE
-        try:
-            is_read = event_type not in ["manual_review", "uncategorised"]
-            if is_read:
-                self.graph_client.mark_email_read(msg_id_for_read, source_account, is_read)
-        except Exception as e:
-            logger.warning(f"Failed to mark as read: {e}")
+        # # ✅ Mark as read using the correct message ID - LIKE TEST CODE
+        # try:
+        #     is_read = event_type not in ["manual_review", "uncategorised"]
+        #     if is_read:
+        #         self.graph_client.mark_email_read(msg_id_for_read, source_account, is_read)
+        # except Exception as e:
+        #     logger.warning(f"Failed to mark as read: {e}")
         
         return True
             
