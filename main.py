@@ -13,7 +13,7 @@ import threading
 import logging
 from dotenv import load_dotenv
 from flask import Flask, jsonify
-from flask_cors import CORS  # Add this import
+from flask_cors import CORS
 from threading import Thread
 
 # Load environment variables
