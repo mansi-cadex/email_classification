@@ -47,7 +47,6 @@ ALLOWED_LABELS = [
     "manual_review",
     "uncategorised"
 ]
-
 # Labels that should receive responses
 RESPONSE_LABELS = [
     "invoice_request_no_info",
