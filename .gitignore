@@ -49,7 +49,7 @@ logs/
 email_processor.log
 mail_move.log
 
-# Environment variables
+# Environment variables (CRITICAL - Never commit these!)
 .env
 .env.local
 .env.development
@@ -58,6 +58,9 @@ mail_move.log
 .env.development.local
 .env.test.local
 .env.production.local
+# Additional environment patterns
+.envrc
+.env.*
 
 # Database files
 *.sqlite3
@@ -149,3 +152,78 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# Security and Secrets (CRITICAL - Never commit these!)
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+id_rsa
+id_rsa.pub
+*.ssh/
+secrets/
+credentials/
+tokens/
+keys/
+
+# Email classifier specific
+# Email files and attachments
+*.eml
+*.msg
+attachments/
+email_data/
+processed_emails/
+
+# Model and AI related
+models/
+checkpoints/
+*.pkl
+*.joblib
+*.h5
+*.pb
+training_data/
+model_cache/
+
+# Configuration files with sensitive data
+config.json
+config.yml
+config.yaml
+settings.json
+settings.yml
+settings.yaml
+
+# Temporary directories
+tmp/
+temp/
+temporary/
+
+# Process ID files
+*.pid
+
+# Node modules (if any frontend components)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Git specific
+*.orig
+*.rej
+
+# Archive files
+*.tar
+*.tar.gz
+*.zip
+*.rar
+*.7z
+
+# Email classifier output files
+AI_Agent_Data_Load_*.xlsx
+batch_reports/
+classification_reports/
+
+# System files
+*.lock
+.DS_Store
+Thumbs.db

@@ -1,10 +1,11 @@
 """
 db.py - Simplified database operations for email classification system.
 
-Essential operations only:
-1. MongoDB for email storage and batch resumption
-2. PostgreSQL for batch tracking
+Essential operations with SECURITY FIXES:
+1. MongoDB for email storage and batch resumption (with TLS)
+2. PostgreSQL for batch tracking (with TLS)
 3. Basic synchronization
+4. Issue #4: Database TLS enforcement for both MongoDB and PostgreSQL
 """
 
 import os
@@ -24,11 +25,18 @@ load_dotenv()
 RESPONSE_LABELS = ["invoice_request_no_info", "claims_paid_no_proof"]
 
 class MongoConnector:
-    """MongoDB operations for email classification system."""
+    """MongoDB operations for email classification system with TLS enforcement."""
     
     def __init__(self):
         self.uri = os.getenv("MONGO_URI")
-        self.client = MongoClient(self.uri)
+        
+        # SECURITY FIX Issue #4: Force TLS for MongoDB
+        if self.uri and "tls=true" not in self.uri.lower() and "ssl=true" not in self.uri.lower():
+            # Add TLS parameter to URI if not already present
+            separator = "&" if "?" in self.uri else "?"
+            self.uri += f"{separator}tls=true&tlsAllowInvalidCertificates=false"
+            
+        self.client = MongoClient(self.uri, tls=True, tlsAllowInvalidCertificates=False)
         self.db_name = os.getenv("MONGO_DB")
         self.collection_name = os.getenv("MONGO_COLLECTION")
         
@@ -53,7 +61,7 @@ class MongoConnector:
             logger.info(f"MongoDB batch_runs id index already exists or failed: {str(e)}")
         
         self.current_batch_id = None
-        logger.info(f"Connected to MongoDB: {self.db_name}.{self.collection_name}")
+        logger.info(f"Connected to MongoDB with TLS enforcement: {self.db_name}.{self.collection_name}")
 
     def set_batch_id(self, batch_id: str):
         """Set the current batch ID."""
@@ -235,7 +243,7 @@ class MongoConnector:
 
 
 class PostgresConnector:
-    """PostgreSQL operations for batch tracking."""
+    """PostgreSQL operations for batch tracking with TLS enforcement."""
     
     _pool = None
     
@@ -249,9 +257,10 @@ class PostgresConnector:
                 port=int(os.getenv("DB_PORT", 5432)),
                 dbname=os.getenv("DB_NAME"),
                 user=os.getenv("DB_USERNAME"),
-                password=os.getenv("DB_PASSWORD")
+                password=os.getenv("DB_PASSWORD"),
+                sslmode="require"  # SECURITY FIX Issue #4: Force TLS encryption
             )
-            logger.info("PostgreSQL connection pool initialized")
+            logger.info("PostgreSQL connection pool initialized with TLS enforcement")
         return cls._pool
 
     @classmethod
@@ -391,7 +400,6 @@ class PostgresConnector:
             return 0
         finally:
             PostgresConnector.return_connection(conn)
-
 
 # Factory Functions
 @lru_cache(maxsize=1)

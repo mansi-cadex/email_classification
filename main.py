@@ -4,6 +4,7 @@ main.py - Simple application entry point for the Email Classification System
 
 Clean entry point that just starts the system and handles shutdown.
 All batch logic is in loop.py where it belongs.
+UNIFIED signal handling for Issue #6 complete.
 """
 
 import os
@@ -12,27 +13,46 @@ import signal
 import threading
 import logging
 from dotenv import load_dotenv
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 from flask_cors import CORS
 from threading import Thread
+from functools import wraps
 
 # Load environment variables
 load_dotenv()
 
 # Import after loading environment
 from src.log_config import logger
-from loop import run_email_processor
 
 # Initialize Flask app for health checks
 app = Flask(__name__)
 
-# Enable CORS for all routes - THIS FIXES THE ERROR
-CORS(app, origins="*")  # Allow all origins, or specify your domain
+# SECURITY: No CORS needed - curl only, no browser access
+CORS(app, origins=["http://localhost:5000"])  # Minimal - just for safety
 
-# Simple global state for processor control
+# SECURITY: API Key from environment
+API_KEY = os.getenv("API_KEY", "default-secret-key-change-me")
+
+# UNIFIED SIGNAL HANDLING - Issue #6 FIX
 processor_running = False
 processor_thread = None
-stop_event = threading.Event()
+stop_event = threading.Event()  # Unified stop mechanism
+
+# SECURITY: Authentication decorator
+def require_api_key(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        # Check Authorization header
+        auth_header = request.headers.get('Authorization', '')
+        if not auth_header.startswith('Bearer '):
+            return jsonify({"success": False, "message": "Missing Authorization header"}), 401
+        
+        token = auth_header.replace('Bearer ', '')
+        if token != API_KEY:
+            return jsonify({"success": False, "message": "Invalid API key"}), 401
+        
+        return f(*args, **kwargs)
+    return decorated_function
 
 # In-memory log capture for API endpoint
 class LogCapture(logging.Handler):
@@ -52,92 +72,68 @@ log_capture = LogCapture()
 log_capture.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
 logger.addHandler(log_capture)
 
-@app.route('/health')
+# UNIFIED SIGNAL HANDLING - Wrapper function
+def run_email_processor_wrapper():
+    """Wrapper to pass stop_event to email processor - ISSUE #6 FIX"""
+    from loop import run_email_processor
+    run_email_processor(stop_event)
+
+@app.route('/health', methods=['GET'])
 def health_check():
-    """Health check endpoint for Docker"""
+    """Health check endpoint for Docker - NO AUTH REQUIRED"""
     return jsonify({"status": "healthy", "processor_running": processor_running}), 200
 
-@app.route('/start')
-@app.route('/start/<int:batch_size>')
-def start_processor(batch_size=None):
-    """Start email processor with optional batch size"""
+@app.route('/start', methods=['POST'])
+@require_api_key  # SECURITY: Requires API key
+def start_processor():
+    """Start email processor with UNIFIED signal handling"""
     global processor_running, processor_thread
     
-    # Check if thread is actually running
-    if processor_thread and processor_thread.is_alive():
+    if processor_running:
         return jsonify({"success": False, "message": "Already running"}), 400
     
     try:
-        # Clean up stop signal file if it exists
-        try:
-            os.remove("/tmp/stop_email_processor")
-        except:
-            pass
-        
-        # Set batch size in environment if provided
-        if batch_size:
-            os.environ['RUNTIME_BATCH_SIZE'] = str(batch_size)
-            logger.info(f"Starting processor with custom batch size: {batch_size}")
-        else:
-            # Remove any existing runtime batch size
-            if 'RUNTIME_BATCH_SIZE' in os.environ:
-                del os.environ['RUNTIME_BATCH_SIZE']
-            
-        stop_event.clear()
-        processor_thread = Thread(target=run_email_processor)
+        stop_event.clear()  # Clear the unified stop signal
+        processor_thread = Thread(target=run_email_processor_wrapper)  # Use wrapper
         processor_thread.daemon = True
         processor_thread.start()
         processor_running = True
         
-        effective_batch_size = batch_size or int(os.getenv("BATCH_SIZE", 120))
-        return jsonify({
-            "success": True, 
-            "message": f"Email processor started with batch size: {effective_batch_size}"
-        })
+        logger.info("Email processor started via API with unified signal handling")
+        return jsonify({"success": True, "message": "Email processor started"})
     except Exception as e:
+        logger.error(f"Failed to start processor: {e}")
         return jsonify({"success": False, "message": str(e)}), 500
 
-@app.route('/stop')
+@app.route('/stop', methods=['POST'])
+@require_api_key  # SECURITY: Requires API key
 def stop_processor():
-    """Stop email processor"""
+    """Stop email processor with UNIFIED signal handling"""
     global processor_running
     
-    # Check if thread is actually running
-    if not processor_thread or not processor_thread.is_alive():
-        processor_running = False  # Sync the flag
+    if not processor_running:
         return jsonify({"success": False, "message": "Not running"}), 400
     
     try:
-        # Create stop signal file
-        with open("/tmp/stop_email_processor", "w") as f:
-            f.write("stop")
-        
+        stop_event.set()  # Set the unified stop signal
         processor_running = False
-        logger.info("Stop signal sent to email processor")
         
-        return jsonify({"success": True, "message": "Stop signal sent - processor will stop after current batch"})
-        
+        logger.info("Email processor stop requested via API - unified signal sent")
+        return jsonify({"success": True, "message": "Email processor stop requested"})
     except Exception as e:
-        logger.error(f"Error stopping processor: {str(e)}")
+        logger.error(f"Failed to stop processor: {e}")
         return jsonify({"success": False, "message": str(e)}), 500
 
-@app.route('/status')
-def get_status():
-    """Get actual processor status"""
-    thread_alive = processor_thread and processor_thread.is_alive()
-    return jsonify({
-        "processor_running_flag": processor_running,
-        "thread_actually_running": thread_alive,
-        "stop_file_exists": os.path.exists("/tmp/stop_email_processor")
-    })
-    
-@app.route('/logs')
+@app.route('/logs', methods=['GET'])
+@require_api_key  # SECURITY: Requires API key
 def get_logs():
-    """Get all logs from memory with proper line breaks"""
+    """Get all logs from memory"""
     try:
-        # Return logs as plain text with proper line breaks instead of JSON array
-        formatted_logs = "\n".join(log_capture.log_buffer)
-        return formatted_logs, 200, {'Content-Type': 'text/plain'}
+        return jsonify({
+            "success": True,
+            "logs": log_capture.log_buffer.copy(),
+            "total_logs": len(log_capture.log_buffer)
+        })
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
 
@@ -146,7 +142,7 @@ def log_startup_config():
     logger.info("=== Email Processing System Starting ===")
     
     # Log model configuration  
-    model_url = "http://34.26.80.201:8000"
+    model_url = os.getenv("MODEL_API_URL", "http://34.72.113.155:8000")
     logger.info(f"Model API URL: {model_url}")
     
     # Log email configuration
@@ -160,25 +156,31 @@ def log_startup_config():
     else:
         logger.warning("No EMAIL_ADDRESS configured!")
     
-    # Log key settings - CORRECT VALUES from .env
-    batch_size = os.getenv("BATCH_SIZE", "50")
-    batch_interval = os.getenv("BATCH_INTERVAL_MINUTES", "10")
-    
+    # Log key settings
     logger.info("Settings:")
     logger.info(f"- MAIL_SEND_ENABLED: {os.getenv('MAIL_SEND_ENABLED', 'False')}")
     logger.info(f"- FORCE_DRAFTS: {os.getenv('FORCE_DRAFTS', 'True')}")
     logger.info(f"- SFTP_ENABLED: {os.getenv('SFTP_ENABLED', 'False')}")
-    logger.info(f"- BATCH_SIZE: {batch_size}")
-    logger.info(f"- BATCH_INTERVAL: {batch_interval} minutes")
+    logger.info(f"- BATCH_SIZE: {os.getenv('BATCH_SIZE', '50')} (from env)")
+    logger.info(f"- BATCH_INTERVAL: {os.getenv('BATCH_INTERVAL_MINUTES', '10')} minutes (from env)")
+    
+    # SECURITY: Log API key status
+    if API_KEY == "default-secret-key-change-me":
+        logger.warning("⚠️  Using default API key - CHANGE THIS IN PRODUCTION!")
+    else:
+        logger.info("✅ Custom API key configured")
+        
+    # Log unified signal handling
+    logger.info("✅ Unified signal handling enabled (Issue #6 fixed)")
 
 def setup_signal_handlers():
-    """Setup graceful shutdown signal handlers"""
+    """Setup graceful shutdown signal handlers with UNIFIED stop mechanism"""
     def signal_handler(sig, frame):
         signal_name = "SIGINT" if sig == signal.SIGINT else "SIGTERM"
         logger.info(f"Received {signal_name}, shutting down gracefully...")
         global processor_running
         if processor_running:
-            stop_event.set()
+            stop_event.set()  # Unified stop signal
             processor_running = False
         
         sys.exit(0)
@@ -194,8 +196,10 @@ def main():
         log_startup_config()
         
         logger.info("System ready - waiting for /start command")
-        logger.info("Control endpoints: /start /stop /logs /health")
-        logger.info("CORS enabled for cross-origin requests")
+        logger.info("Control endpoints: POST /start, POST /stop, GET /logs, GET /health")
+        logger.info("CORS restricted to localhost origins")
+        logger.info("🔒 Authentication required for control endpoints")
+        logger.info("🔄 Unified signal handling active")
         
         # Start Flask and wait for commands (NO auto-start)
         app.run(host='0.0.0.0', port=5000, debug=False)
