@@ -8,7 +8,7 @@ LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 # Get the logger
 logger = logging.getLogger("email_processor")
 
-# Only configure if not already configured
+
 if not logger.handlers:
     # Set level
     logger.setLevel(getattr(logging, LOG_LEVEL.upper(), logging.INFO))
