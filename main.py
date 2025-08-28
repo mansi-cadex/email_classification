@@ -31,7 +31,7 @@ app = Flask(__name__)
 CORS(app, origins=["http://localhost:5000"])  # Minimal - just for safety
 
 # SECURITY: API Key from environment
-API_KEY = os.getenv("API_KEY", "default-secret-key-change-me")
+API_KEY = "email-classifier-a1b2c3d4-e5f6-7890-abcd-ef1234567890"
 
 # UNIFIED SIGNAL HANDLING - Issue #6 FIX
 processor_running = False
