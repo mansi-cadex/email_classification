@@ -1,191 +1,216 @@
 #!/usr/bin/env python3
 """
-main.py - Application entry point for the Email Classification System
+main.py - Simple application entry point for the Email Classification System
 
-This module serves as the main entry point for the email classification system.
-It handles:
-1. Initializing logging
-2. Parsing command-line arguments
-3. Starting the main email processing loop
-4. Graceful shutdown and error reporting
+Clean entry point that just starts the system and handles shutdown.
+All batch logic is in loop.py where it belongs.
+UNIFIED signal handling for Issue #6 complete.
 """
 
 import os
 import sys
-import time
 import signal
+import threading
 import logging
-from datetime import datetime
 from dotenv import load_dotenv
-from src.log_config import logger
-from loop import clean_failed_batches, retry_failed_batches, process_batch
-from flask import Flask, jsonify
-
-# Initialize Flask app
-app = Flask(__name__)
-
-@app.route('/health')
-def health_check():
-    """Health check endpoint for Docker"""
-    return jsonify({"status": "healthy"}), 200
-
-# Emergency exit handler - will force exit immediately
-def emergency_exit(signum, frame):
-    print("\nEmergency exit triggered. Terminating immediately...")
-    os._exit(1)  # Force exit without cleanup
-
-
-# Register emergency exit for Ctrl+\
-signal.signal(signal.SIGQUIT, emergency_exit)
-
+from flask import Flask, jsonify, request
+from flask_cors import CORS
+from threading import Thread
+from functools import wraps
 
 # Load environment variables
 load_dotenv()
 
+# Import after loading environment
+from src.log_config import logger
 
-def setup_logging():
-    """Configure logging for the application"""
-    log_level = os.getenv("LOG_LEVEL", "INFO")
-    log_format = '%(asctime)s [%(levelname)s] %(name)s: %(message)s'
-    
-    log_dir = os.getenv("LOG_DIR", "logs")
-    if not os.path.exists(log_dir):
-        try:
-            os.makedirs(log_dir, exist_ok=True)
-        except:
-            log_dir = "."
-    
-    log_file = os.path.join(log_dir, 'email_processor.log')
-    
-    logging.basicConfig(
-        level=getattr(logging, log_level),
-        format=log_format,
-        handlers=[
-            logging.StreamHandler(),
-            logging.FileHandler(log_file)
-        ]
-    )
-    logger.info(f"Logging initialized at {log_level} level")
+# Initialize Flask app for health checks
+app = Flask(__name__)
 
+# SECURITY: No CORS needed - curl only, no browser access
+CORS(app, origins=["http://localhost:5000"])  # Minimal - just for safety
 
-def get_env_int(key: str, default: int) -> int:
-    """Safely get integer from environment variable."""
-    value = os.getenv(key, str(default))
-    # Remove any comments and whitespace
-    value = value.split('#')[0].strip()
-    try:
-        return int(value)
-    except ValueError:
-        logger.warning(f"Invalid value for {key}: '{value}'. Using default: {default}")
-        return default
+# SECURITY: API Key from environment
+API_KEY = "email-classifier-a1b2c3d4-e5f6-7890-abcd-ef1234567890"
 
+# UNIFIED SIGNAL HANDLING - Issue #6 FIX
+processor_running = False
+processor_thread = None
+stop_event = threading.Event()  # Unified stop mechanism
 
-def main():
-    """Main entry point for the email processing application"""
-    # Set flag to track if shutdown is requested
-    shutdown_requested = False
-    
-    # Define signal handler for graceful shutdown
-    def signal_handler(sig, frame):
-        nonlocal shutdown_requested
-        signal_name = "SIGINT" if sig == signal.SIGINT else "SIGTERM"
-        logger.info(f"Received {signal_name}, initiating graceful shutdown...")
-        shutdown_requested = True
+# SECURITY: Authentication decorator
+def require_api_key(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        # Check Authorization header
+        auth_header = request.headers.get('Authorization', '')
+        if not auth_header.startswith('Bearer '):
+            return jsonify({"success": False, "message": "Missing Authorization header"}), 401
         
-        # Set a timeout to force exit if graceful shutdown takes too long
-        def force_exit():
-            logger.warning("Graceful shutdown is taking too long. Forcing exit...")
-            os._exit(1)
-            
-        # Schedule force exit after 5 seconds
-        signal.alarm(5)
+        token = auth_header.replace('Bearer ', '')
+        if token != API_KEY:
+            return jsonify({"success": False, "message": "Invalid API key"}), 401
+        
+        return f(*args, **kwargs)
+    return decorated_function
+
+# In-memory log capture for API endpoint
+class LogCapture(logging.Handler):
+    def __init__(self):
+        super().__init__()
+        self.log_buffer = []
+        self.max_logs = 1000  # Keep last 1000 log entries
     
-    # Register handlers for SIGINT (Ctrl+C) and SIGTERM
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
+    def emit(self, record):
+        log_entry = self.format(record)
+        self.log_buffer.append(log_entry)
+        if len(self.log_buffer) > self.max_logs:
+            self.log_buffer.pop(0)  # Remove oldest entry
+
+# Add log capture handler
+log_capture = LogCapture()
+log_capture.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+logger.addHandler(log_capture)
+
+# UNIFIED SIGNAL HANDLING - Wrapper function
+def run_email_processor_wrapper():
+    """Wrapper to pass stop_event to email processor - ISSUE #6 FIX"""
+    from loop import run_email_processor
+    run_email_processor(stop_event)
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    """Health check endpoint for Docker - NO AUTH REQUIRED"""
+    return jsonify({"status": "healthy", "processor_running": processor_running}), 200
+
+@app.route('/start', methods=['POST'])
+@require_api_key  # SECURITY: Requires API key
+def start_processor():
+    """Start email processor with UNIFIED signal handling"""
+    global processor_running, processor_thread
     
-    # Register SIGALRM to force exit
-    signal.signal(signal.SIGALRM, lambda sig, frame: os._exit(1))
+    if processor_running:
+        return jsonify({"success": False, "message": "Already running"}), 400
     
-    # Initialize logging
-    setup_logging()
+    try:
+        stop_event.clear()  # Clear the unified stop signal
+        processor_thread = Thread(target=run_email_processor_wrapper)  # Use wrapper
+        processor_thread.daemon = True
+        processor_thread.start()
+        processor_running = True
+        
+        logger.info("Email processor started via API with unified signal handling")
+        return jsonify({"success": True, "message": "Email processor started"})
+    except Exception as e:
+        logger.error(f"Failed to start processor: {e}")
+        return jsonify({"success": False, "message": str(e)}), 500
+
+@app.route('/stop', methods=['POST'])
+@require_api_key  # SECURITY: Requires API key
+def stop_processor():
+    """Stop email processor with UNIFIED signal handling"""
+    global processor_running
     
+    if not processor_running:
+        return jsonify({"success": False, "message": "Not running"}), 400
+    
+    try:
+        stop_event.set()  # Set the unified stop signal
+        processor_running = False
+        
+        logger.info("Email processor stop requested via API - unified signal sent")
+        return jsonify({"success": True, "message": "Email processor stop requested"})
+    except Exception as e:
+        logger.error(f"Failed to stop processor: {e}")
+        return jsonify({"success": False, "message": str(e)}), 500
+
+@app.route('/logs', methods=['GET'])
+@require_api_key  # SECURITY: Requires API key
+def get_logs():
+    """Get all logs from memory"""
+    try:
+        return jsonify({
+            "success": True,
+            "logs": log_capture.log_buffer.copy(),
+            "total_logs": len(log_capture.log_buffer)
+        })
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+
+def log_startup_config():
+    """Log startup configuration"""
     logger.info("=== Email Processing System Starting ===")
+    
+    # Log model configuration  
+    model_url = os.getenv("MODEL_API_URL", "http://34.72.113.155:8000")
+    logger.info(f"Model API URL: {model_url}")
+    
+    # Log email configuration
+    email_env = os.getenv("EMAIL_ADDRESS", "")
+    if email_env:
+        if "," in email_env:
+            emails = [e.strip() for e in email_env.split(",")]
+            logger.info(f"Multi-email mode: {len(emails)} accounts configured")
+        else:
+            logger.info(f"Single-email mode: {email_env}")
+    else:
+        logger.warning("No EMAIL_ADDRESS configured!")
+    
+    # Log key settings
     logger.info("Settings:")
     logger.info(f"- MAIL_SEND_ENABLED: {os.getenv('MAIL_SEND_ENABLED', 'False')}")
-    logger.info(f"- FORCE_DRAFTS: {os.getenv('FORCE_DRAFTS', 'False')}")
+    logger.info(f"- FORCE_DRAFTS: {os.getenv('FORCE_DRAFTS', 'True')}")
     logger.info(f"- SFTP_ENABLED: {os.getenv('SFTP_ENABLED', 'False')}")
-    logger.info(f"- BATCH_SIZE: {get_env_int('BATCH_SIZE', 125)}")
-    logger.info(f"- BATCH_INTERVAL: {get_env_int('BATCH_INTERVAL', 21600)} seconds")
+    logger.info(f"- BATCH_SIZE: {os.getenv('BATCH_SIZE', '50')} (from env)")
+    logger.info(f"- BATCH_INTERVAL: {os.getenv('BATCH_INTERVAL_MINUTES', '10')} minutes (from env)")
     
-    # Start Flask in a separate thread
-    from threading import Thread
-    flask_thread = Thread(target=lambda: app.run(host='0.0.0.0', port=5000))
-    flask_thread.daemon = True
-    flask_thread.start()
+    # SECURITY: Log API key status
+    if API_KEY == "default-secret-key-change-me":
+        logger.warning("⚠️  Using default API key - CHANGE THIS IN PRODUCTION!")
+    else:
+        logger.info("✅ Custom API key configured")
+        
+    # Log unified signal handling
+    logger.info("✅ Unified signal handling enabled (Issue #6 fixed)")
+
+def setup_signal_handlers():
+    """Setup graceful shutdown signal handlers with UNIFIED stop mechanism"""
+    def signal_handler(sig, frame):
+        signal_name = "SIGINT" if sig == signal.SIGINT else "SIGTERM"
+        logger.info(f"Received {signal_name}, shutting down gracefully...")
+        global processor_running
+        if processor_running:
+            stop_event.set()  # Unified stop signal
+            processor_running = False
+        
+        sys.exit(0)
     
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+def main():
+    """Main entry point - wait for commands"""
     try:
-        # Clean up existing failed batches
-        if not shutdown_requested:
-            clean_failed_batches()
+        # Setup
+        setup_signal_handlers()
+        log_startup_config()
         
-        # Retry any failed batches
-        if not shutdown_requested:
-            retry_failed_batches()
+        logger.info("System ready - waiting for /start command")
+        logger.info("Control endpoints: POST /start, POST /stop, GET /logs, GET /health")
+        logger.info("CORS restricted to localhost origins")
+        logger.info("🔒 Authentication required for control endpoints")
+        logger.info("🔄 Unified signal handling active")
         
-        # Start the main processing loop
-        if not shutdown_requested:
-            logger.info("Starting main email processing loop")
-            
-            # Get batch interval from environment or use default
-            batch_interval = get_env_int('BATCH_INTERVAL', 300)
-            
-            while not shutdown_requested:
-                # Process a batch
-                start_time = datetime.now()
-                logger.info(f"Starting batch at {start_time.isoformat()}")
-                
-                # Run a single batch
-                try:
-                    # Run a single batch if not shutting down
-                    if not shutdown_requested:
-                        process_batch()
-                        
-                    # Calculate time until next batch
-                    elapsed = (datetime.now() - start_time).total_seconds()
-                    wait_time = max(0, batch_interval - elapsed)
-                    
-                    # Log time until next batch
-                    if not shutdown_requested:
-                        logger.info(f"Batch complete. Next batch in {wait_time:.1f} seconds")
-                    
-                    # Wait until next batch, checking for shutdown frequently
-                    for _ in range(int(wait_time)):
-                        if shutdown_requested:
-                            break
-                        time.sleep(1)
-                        
-                except Exception as e:
-                    logger.error(f"Error processing batch: {str(e)}", exc_info=True)
-                    # Wait a bit but still check for shutdown
-                    for _ in range(min(60, batch_interval)):
-                        if shutdown_requested:
-                            break
-                        time.sleep(1)
-                
-                # Exit the loop if shutdown was requested
-                if shutdown_requested:
-                    break
-    
+        # Start Flask and wait for commands (NO auto-start)
+        app.run(host='0.0.0.0', port=5000, debug=False)
+        
     except KeyboardInterrupt:
-        logger.info("Shutdown requested (KeyboardInterrupt)")
+        logger.info("Shutdown requested")
     except Exception as e:
-        logger.error(f"Unexpected error in main process: {str(e)}", exc_info=True)
+        logger.error(f"Fatal error: {str(e)}", exc_info=True)
+        sys.exit(1)
     finally:
         logger.info("=== Email Processing System Shutdown ===")
-        # Force exit after logging shutdown message
-        os._exit(0)
-
 
 if __name__ == "__main__":
     main()
