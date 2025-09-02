@@ -72,7 +72,7 @@ class ModelAPIClient:
     def health_check(self):
         """Quick health check with timeout (only for health check)."""
         try:
-            response = requests.get(f"{self.base_url}/api/health", timeout=60)
+            response = requests.get(f"{self.base_url}/api/health", timeout=10)
             return response.status_code == 200
         except:
             return False

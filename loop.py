@@ -48,7 +48,7 @@ def check_model_health() -> bool:
     """Check if model API is available and responding"""
     try:
         model_url = "http://34.26.80.201:8000"
-        response = requests.get(f"{model_url}/api/health", timeout=10)  # <- CHANGE THIS LINE
+        response = requests.get(f"{model_url}/api/health", timeout=10)
         if response.status_code == 200:
             return True
         else:
