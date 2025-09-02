@@ -15,6 +15,8 @@ import sys
 import time
 import uuid
 import io
+import httpx
+import msal
 import threading
 import pandas as pd
 import requests 
@@ -26,7 +28,7 @@ from dotenv import load_dotenv
 from typing import Tuple, Dict, List, Optional, Any
 
 # Import from refactored modules
-from src.fetch_reply import process_unread_emails
+from src.fetch_reply import process_unread_emails, generate_daily_report
 from src.db import get_mongo, get_postgres, PostgresConnector
 from src.log_config import logger
 
@@ -36,6 +38,7 @@ load_dotenv()
 # Configuration - Hardcoded settings (no DevOps dependency)
 MAIL_SEND_ENABLED = os.getenv("MAIL_SEND_ENABLED", "False").lower() in ["true", "yes", "1"]
 FORCE_DRAFTS = os.getenv("FORCE_DRAFTS", "True").lower() in ["true", "yes", "1"]
+_last_report_date = None
 
 # SFTP Configuration
 SFTP_HOST = os.getenv("SFTP_HOST")
@@ -43,6 +46,11 @@ SFTP_PORT = int(os.getenv("SFTP_PORT", "22"))
 SFTP_USERNAME = os.getenv("SFTP_USERNAME")
 SFTP_PASSWORD = os.getenv("SFTP_PASSWORD")
 SFTP_ENABLED = os.getenv("SFTP_ENABLED", "False").lower() in ["true", "yes", "1"]
+# Environment variables for Microsoft Graph API (needed for alerts)
+CLIENT_ID = os.getenv("CLIENT_ID")
+CLIENT_SECRET = os.getenv("CLIENT_SECRET")
+TENANT_ID = os.getenv("TENANT_ID")
+EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS")
 
 def check_model_health(max_retries: int = 3, base_timeout: int = 60) -> bool:
     """Robust model health check with retries and backoff."""
@@ -722,8 +730,139 @@ def run_batch_processor(stop_event=None) -> bool:
    
     return success
 
+ALERT_EMAILS = [
+    "sanskar.gawande@cadex-solutions.com",
+    "yogesh.patel@cadex-solutions.com"
+    # Add more alert emails here as needed
+]
+
+# Global variables for monitoring
+last_activity_time = datetime.now()
+last_alert_time = None
+alert_count = 0
+
+# ADD THESE FUNCTIONS before run_email_processor() function
+
+def get_alert_access_token():
+    """Get Microsoft Graph API access token for alert emails."""
+    try:
+        app = msal.ConfidentialClientApplication(
+            client_id=CLIENT_ID,
+            client_credential=CLIENT_SECRET,
+            authority=f"https://login.microsoftonline.com/{TENANT_ID}"
+        )
+        
+        result = app.acquire_token_for_client(scopes=["https://graph.microsoft.com/.default"])
+        
+        if "access_token" in result:
+            return result["access_token"]
+        else:
+            logger.error(f"Failed to acquire alert token: {result.get('error_description')}")
+            return None
+            
+    except Exception as e:
+        logger.error(f"Error getting alert access token: {e}")
+        return None
+
+def send_stuck_alert():
+    """Send alert email that system appears stuck."""
+    if not ALERT_EMAILS:
+        logger.warning("No alert emails configured")
+        return False
+    
+    try:
+        # Get access token
+        access_token = get_alert_access_token()
+        if not access_token:
+            logger.error("Could not get access token for alert")
+            return False
+        
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json"
+        }
+        
+        # Calculate how long system has been stuck
+        hours_stuck = (datetime.now() - last_activity_time).total_seconds() / 3600
+        
+        # Simple alert message
+        alert_text = f"""ALERT: Email Processing System Stuck
+
+The email processing system appears to be stuck for {hours_stuck:.1f} hours.
+
+Please check the system status.
+
+Alert sent: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+"""
+        
+        # Prepare email
+        to_recipients = [{"emailAddress": {"address": email}} for email in ALERT_EMAILS]
+        subject = "ALERT: Email Processing System Stuck"
+        
+        message = {
+            "subject": subject,
+            "body": {"contentType": "Text", "content": alert_text},
+            "toRecipients": to_recipients,
+            "importance": "High"
+        }
+        
+        payload = {"message": message, "saveToSentItems": "true"}
+        from_email = EMAIL_ADDRESS.split(',')[0].strip() if EMAIL_ADDRESS else ""
+        endpoint = f"https://graph.microsoft.com/v1.0/users/{from_email}/sendMail"
+        
+        response = httpx.post(endpoint, headers=headers, json=payload, timeout=30)
+        
+        if response.status_code in [200, 202]:
+            logger.warning(f"STUCK ALERT sent to {len(ALERT_EMAILS)} recipients - system stuck for {hours_stuck:.1f} hours")
+            return True
+        else:
+            logger.error(f"Failed to send stuck alert: {response.status_code}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"Error sending stuck alert: {e}")
+        return False
+
+def check_and_send_stuck_alert():
+    """Check if system is stuck and send alerts according to schedule."""
+    global last_alert_time, alert_count
+    
+    # Calculate time since last activity
+    time_since_activity = (datetime.now() - last_activity_time).total_seconds() / 3600  # hours
+    
+    # First alert after 1 hour of inactivity
+    if time_since_activity >= 1.0 and last_alert_time is None:
+        logger.warning(f"System stuck for {time_since_activity:.1f} hours - sending first alert")
+        if send_stuck_alert():
+            last_alert_time = datetime.now()
+            alert_count = 1
+    
+    # Follow-up alerts every 2 hours after first alert
+    elif last_alert_time and time_since_activity >= (1.0 + alert_count * 2.0):
+        logger.warning(f"System stuck for {time_since_activity:.1f} hours - sending follow-up alert #{alert_count + 1}")
+        if send_stuck_alert():
+            last_alert_time = datetime.now()
+            alert_count += 1
+
+def update_activity_timestamp():
+    """Reset activity tracking - call this when system is working normally."""
+    global last_activity_time, last_alert_time, alert_count
+    
+    # Check if we're recovering from a stuck state
+    was_stuck = last_alert_time is not None
+    
+    # Reset all monitoring variables
+    last_activity_time = datetime.now()
+    last_alert_time = None
+    alert_count = 0
+    
+    if was_stuck:
+        logger.info("System activity detected - monitoring reset, alerts cleared")
+
 def run_email_processor(stop_event=None):
-    """Main batch processing loop with UNIFIED stop signal."""
+    """Main batch processing loop with UNIFIED stop signal, daily reports, and stuck detection alerts."""
+    global _last_report_date  # Track daily report sending
+    
     # Create default stop event if not provided (for backward compatibility)
     if stop_event is None:
         stop_event = threading.Event()
@@ -744,6 +883,9 @@ def run_email_processor(stop_event=None):
     max_failures = 3
    
     while True:
+        # === STUCK ALERT CHECK ===
+        check_and_send_stuck_alert()
+        
         # CHECK UNIFIED STOP SIGNAL
         if stop_event.is_set():
             logger.info("STOP: Stop signal detected - shutting down processor NOW")
@@ -752,6 +894,9 @@ def run_email_processor(stop_event=None):
         start_time = datetime.now()
         logger.info(f"Starting batch at {start_time.isoformat()}")
        
+        # === RESET ACTIVITY TIMESTAMP (system is active again) ===
+        update_activity_timestamp()
+        
         try:
             # Check model health before processing
             if not check_model_health():
@@ -761,9 +906,7 @@ def run_email_processor(stop_event=None):
                 if consecutive_failures >= max_failures:
                     logger.info(f"Model down for {max_failures} consecutive attempts - attempting recovery")
                     
-                    # UNIFIED stop signal passed to recovery
                     recovery_success = wait_for_model_recovery(stop_event, max_retries=3)
-                    
                     if recovery_success:
                         consecutive_failures = 0
                         logger.info("Model recovery successful - continuing processing")
@@ -773,8 +916,6 @@ def run_email_processor(stop_event=None):
                         break
                 else:
                     logger.info(f"Waiting 60 seconds before retry (failure {consecutive_failures}/{max_failures})")
-                    
-                    # CHECK UNIFIED STOP DURING WAIT
                     for i in range(60):
                         if stop_event.is_set():
                             logger.info("STOP: Stop signal detected during wait - shutting down NOW")
@@ -787,6 +928,22 @@ def run_email_processor(stop_event=None):
             
             # Run main batch processor with stop signal
             run_batch_processor(stop_event)
+            
+            # === DAILY REPORT CHECK ===
+            current_date = datetime.now().date()
+            current_hour = datetime.now().hour
+            if current_hour >= 9 and _last_report_date != current_date:
+                logger.info("Sending daily report...")
+                try:
+                    report_success = generate_daily_report()
+                    if report_success:
+                        logger.info("Daily report sent successfully")
+                        _last_report_date = current_date
+                    else:
+                        logger.error("Daily report failed to send")
+                except Exception as e:
+                    logger.error(f"Error sending daily report: {e}")
+            # ==========================
            
             # Calculate time to next batch
             elapsed = (datetime.now() - start_time).total_seconds()
@@ -794,14 +951,15 @@ def run_email_processor(stop_event=None):
            
             logger.info(f"Batch complete. Next batch in {wait_time:.1f} seconds")
             
-            # CHECK UNIFIED STOP DURING BATCH INTERVAL WAIT
             for i in range(int(wait_time)):
+                # Keep monitoring stuck status during idle wait
+                check_and_send_stuck_alert()
+                
                 if stop_event.is_set():
                     logger.info("STOP: Stop signal detected during batch interval - shutting down NOW")
                     return
                 time.sleep(1)
             
-            # Handle remaining fractional seconds
             remaining = wait_time - int(wait_time)
             if remaining > 0:
                 time.sleep(remaining)
@@ -813,9 +971,10 @@ def run_email_processor(stop_event=None):
             logger.exception(f"Unhandled error in batch processor: {str(e)}")
             consecutive_failures += 1
             logger.info(f"Waiting 60 seconds before retry due to error")
-            
-            # CHECK UNIFIED STOP DURING ERROR WAIT
             for i in range(60):
+                # Keep monitoring stuck status during error wait
+                check_and_send_stuck_alert()
+                
                 if stop_event.is_set():
                     logger.info("STOP: Stop signal detected during error wait - shutting down NOW")
                     return

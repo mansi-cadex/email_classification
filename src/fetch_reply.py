@@ -64,22 +64,22 @@ def validate_config():
     logger.info("Configuration validation passed")
 
 class ModelAPIClient:
-    """Client for model API calls with UNIFIED stop signal and retry logic."""
+    """Client for model API calls - 60 second timeout with manual review fallback."""
     
     def __init__(self):
         self.base_url = MODEL_API_URL
         
     def health_check(self):
-        """Quick health check with timeout (only for health check)."""
+        """Quick health check with timeout."""
         try:
-            response = requests.get(f"{self.base_url}/api/health", timeout=60)
+            response = requests.get(f"{self.base_url}/api/health", timeout=10)
             return response.status_code == 200
         except:
             return False
 
     def process_email_complete(self, subject, body, headers=None, sender_email=None, 
-                            recipient_emails=None, has_attachments=False, had_threads=False):
-        """Process email with model API - NO TIMEOUT, but WITH RETRY LOGIC."""
+                             recipient_emails=None, has_attachments=False, had_threads=False):
+        """Process email with model API - 60 second timeout, immediate response."""
         payload = {
             "subject": subject,
             "body": body,
@@ -90,41 +90,39 @@ class ModelAPIClient:
             "had_threads": had_threads
         }
         
-        # SECURITY FIX Issue #2: Add retry logic with exponential backoff
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                if attempt == 0:
-                    logger.info(f"Calling model API - waiting for response (no timeout)...")
-                else:
-                    logger.info(f"Retrying model API call (attempt {attempt + 1}/{max_retries})...")
-                
-                # NO TIMEOUT - let it take as long as needed
-                response = requests.post(f"{self.base_url}/api/process_email_complete", json=payload)
-                response.raise_for_status()
-                result = response.json()
-                
-                logger.info(f"Model API processed email: {result.get('event_type', 'unknown')}")
-                return result
-                
-            except Exception as e:
-                logger.error(f"API error (attempt {attempt + 1}/{max_retries}): {e}")
-                
-                # If this was the last attempt, use fallback
-                if attempt == max_retries - 1:
-                    logger.error(f"All {max_retries} attempts failed, using fallback response")
-                    return self._get_fallback_response()
-                
-                # Exponential backoff: 1s, 2s, 4s
-                wait_time = 2 ** attempt
-                logger.info(f"Waiting {wait_time} seconds before retry...")
-                time.sleep(wait_time)
-        
-        # Should never reach here, but just in case
-        return self._get_fallback_response()
+        try:
+            logger.info("Calling model API (60s timeout)...")
+            start_time = time.time()
+            
+            # Single 60-second timeout - no retries needed
+            response = requests.post(
+                f"{self.base_url}/api/process_email_complete", 
+                json=payload, 
+                timeout=60  # 60 seconds max
+            )
+            response.raise_for_status()
+            result = response.json()
+            
+            # Log actual processing time
+            elapsed = time.time() - start_time
+            logger.info(f"Model API completed in {elapsed:.1f}s: {result.get('event_type', 'unknown')}")
+            
+            return result
+            
+        except requests.exceptions.Timeout:
+            logger.warning(f"Model API timeout after 60s - classifying as manual_review")
+            return self._get_manual_review_fallback()
+            
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Model API request error: {e} - classifying as manual_review")
+            return self._get_manual_review_fallback()
+            
+        except Exception as e:
+            logger.error(f"Unexpected model API error: {e} - classifying as manual_review")
+            return self._get_manual_review_fallback()
 
     def generate_reply(self, subject, body, label, sender_name=None, entities=None):
-        """Generate reply - WITH SENDER NAME for personalization and RETRY LOGIC."""
+        """Generate reply - 60 second timeout, no reply if timeout."""
         if label not in RESPONSE_LABELS:
             return ""
             
@@ -136,46 +134,45 @@ class ModelAPIClient:
             "entities": entities or {}
         }
         
-        # SECURITY FIX Issue #2: Add retry logic with exponential backoff
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                if attempt == 0:
-                    logger.info(f"Generating reply for label {label} with sender: {sender_name} (no timeout)...")
-                else:
-                    logger.info(f"Retrying reply generation (attempt {attempt + 1}/{max_retries})...")
-                
-                # NO TIMEOUT - let it take as long as needed
-                response = requests.post(f"{self.base_url}/api/generate_reply", json=payload)
-                response.raise_for_status()
-                result = response.json()
-                reply = result.get("reply", "")
-                
-                logger.info(f"Reply generated for label {label}: {len(reply)} chars")
-                return reply
-                
-            except Exception as e:
-                logger.error(f"Reply generation error (attempt {attempt + 1}/{max_retries}): {e}")
-                
-                # If this was the last attempt, give up
-                if attempt == max_retries - 1:
-                    logger.error(f"All {max_retries} reply attempts failed")
-                    return ""
-                
-                # Exponential backoff: 1s, 2s, 4s
-                wait_time = 2 ** attempt
-                logger.info(f"Waiting {wait_time} seconds before retry...")
-                time.sleep(wait_time)
-        
-        # Should never reach here, but just in case
-        return ""
+        try:
+            logger.info(f"Generating reply for {label} (60s timeout)...")
+            start_time = time.time()
+            
+            # Single 60-second timeout for reply generation too
+            response = requests.post(
+                f"{self.base_url}/api/generate_reply", 
+                json=payload, 
+                timeout=60  # 60 seconds max
+            )
+            response.raise_for_status()
+            result = response.json()
+            reply = result.get("reply", "")
+            
+            # Log actual processing time
+            elapsed = time.time() - start_time
+            logger.info(f"Reply generated in {elapsed:.1f}s for {label}: {len(reply)} chars")
+            
+            return reply
+            
+        except requests.exceptions.Timeout:
+            logger.warning(f"Reply generation timeout after 60s - no reply will be generated")
+            return ""
+            
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Reply generation error: {e} - no reply will be generated")
+            return ""
+            
+        except Exception as e:
+            logger.error(f"Unexpected reply error: {e} - no reply will be generated")
+            return ""
 
-    def _get_fallback_response(self):
-        """Fallback response when model API fails - matches test code."""
+    def _get_manual_review_fallback(self):
+        """Fallback response for failed API calls - sends to manual review."""
+        logger.info("Using manual_review fallback - email will need human review")
         return {
             "debtor_number": "",
-            "event_type": "uncategorised",
-            "target_folder": "uncategorised",
+            "event_type": "manual_review",
+            "target_folder": "manual_review",
             "reply_sent": "no_response",
             "new_contact_email": "",
             "new_contact_phone": "",
@@ -872,4 +869,122 @@ def retry_failed_batch(batch_id, batch_size=30):
         return True
     else:
         logger.warning(f"Retry failed for batch {batch_id}")
+        return False
+
+def generate_daily_report():
+    """
+    Simple daily report function - counts emails processed and sends basic stats.
+    Add this function to your fetch_reply.py file.
+    """
+    from datetime import datetime, timedelta
+    import httpx
+    
+    # Report recipients - UPDATE THESE WITH YOUR ACTUAL EMAILS
+    report_emails = [
+        "sanskar.gawande@cadex-solutions.com",
+        "yogesh.patel@cadex-solutions.com"
+    ]
+    
+    try:
+        # Get yesterday's date
+        yesterday = datetime.now() - timedelta(days=1)
+        start_date = yesterday.replace(hour=0, minute=0, second=0, microsecond=0)
+        end_date = start_date + timedelta(days=1)
+        
+        logger.info(f"Generating daily report for: {start_date.strftime('%Y-%m-%d')}")
+        
+        # Get MongoDB connection
+        mongo = get_mongo()
+        if not mongo:
+            logger.error("No MongoDB connection for report")
+            return False
+        
+        # Query emails processed yesterday
+        query = {
+            "processed_at": {
+                "$gte": start_date.isoformat(),
+                "$lt": end_date.isoformat()
+            }
+        }
+        
+        emails = list(mongo.collection.find(query))
+        
+        # Simple counting
+        total_emails = len(emails)
+        replies_generated = 0
+        label_counts = {}
+        
+        # Count everything
+        for email in emails:
+            # Count replies
+            if email.get("response", ""):
+                replies_generated += 1
+            
+            # Count by label
+            label = email.get("event_type", "unknown")
+            label_counts[label] = label_counts.get(label, 0) + 1
+        
+        # Create simple text report
+        report_text = f"""Daily Email Processing Report - {start_date.strftime('%Y-%m-%d')}
+
+Total Emails Processed: {total_emails}
+Replies Generated: {replies_generated}
+
+Processing by Label:
+"""
+        
+        # Add label counts
+        for label, count in sorted(label_counts.items()):
+            report_text += f"- {label}: {count} emails\n"
+        
+        report_text += f"""
+Report generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+"""
+        
+        logger.info(f"Report ready: {total_emails} emails, {replies_generated} replies")
+        
+        # Send email using Graph API
+        return send_simple_report_email(report_text, start_date.strftime('%Y-%m-%d'), report_emails)
+        
+    except Exception as e:
+        logger.error(f"Error generating daily report: {e}")
+        return False
+
+def send_simple_report_email(report_text, report_date, recipients):
+    """Send simple text email report."""
+    try:
+        # Create MSGraphClient to get access token
+        graph_client = MSGraphClient()
+        access_token = graph_client.get_access_token()
+        
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json"
+        }
+        
+        # Rest of the function stays the same...
+        to_recipients = [{"emailAddress": {"address": email}} for email in recipients]
+        subject = f"Daily Email Report - {report_date}"
+        
+        message = {
+            "subject": subject,
+            "body": {"contentType": "Text", "content": report_text},
+            "toRecipients": to_recipients,
+            "importance": "Normal"
+        }
+        
+        payload = {"message": message, "saveToSentItems": "true"}
+        endpoint = f"{MS_GRAPH_BASE_URL}/users/{EMAIL_ADDRESS.split(',')[0].strip()}/sendMail"
+        
+        response = httpx.post(endpoint, headers=headers, json=payload, timeout=30)
+        
+        if response.status_code in [200, 202]:
+            logger.info(f"Daily report sent to {len(recipients)} recipients")
+            return True
+        else:
+            logger.error(f"Failed to send report: {response.status_code}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"Error sending report email: {e}")
         return False
