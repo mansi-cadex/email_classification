@@ -1,20 +1,18 @@
 """
 fetch_reply.py - Module for fetching, classifying, and moving emails.
 
-Updated with UNIFIED signal handling for Issue #6:
+Updated based on working test code approach:
 1. Email fetching from multiple accounts
-2. Model API integration with retry logic (Issue #2 fixed)
+2. Model API integration (NO TIMEOUTS - let it take as long as needed)
 3. Email classification and folder organization
 4. Clean text extraction without threads
 5. Reply generation with threaded drafts (during processing)
 6. Complete email data structure for MongoDB
 7. Proper message ID handling after folder moves
-8. UNIFIED threading-based stop mechanism
 """
 
 import os
 import time
-import threading
 import httpx
 import msal
 import requests
@@ -49,6 +47,7 @@ ALLOWED_LABELS = [
     "manual_review",
     "uncategorised"
 ]
+
 # Labels that should receive responses
 RESPONSE_LABELS = [
     "invoice_request_no_info",
@@ -64,22 +63,22 @@ def validate_config():
     logger.info("Configuration validation passed")
 
 class ModelAPIClient:
-    """Client for model API calls with UNIFIED stop signal and retry logic."""
+    """Client for model API calls - 60 second timeout with manual review fallback."""
     
     def __init__(self):
         self.base_url = MODEL_API_URL
         
     def health_check(self):
-        """Quick health check with timeout (only for health check)."""
+        """Quick health check with timeout."""
         try:
-            response = requests.get(f"{self.base_url}/api/health", timeout=60)
+            response = requests.get(f"{self.base_url}/api/health", timeout=10)
             return response.status_code == 200
         except:
             return False
 
     def process_email_complete(self, subject, body, headers=None, sender_email=None, 
-                            recipient_emails=None, has_attachments=False, had_threads=False):
-        """Process email with model API - NO TIMEOUT, but WITH RETRY LOGIC."""
+                             recipient_emails=None, has_attachments=False, had_threads=False):
+        """Process email with model API - 60 second timeout, immediate response."""
         payload = {
             "subject": subject,
             "body": body,
@@ -90,41 +89,39 @@ class ModelAPIClient:
             "had_threads": had_threads
         }
         
-        # SECURITY FIX Issue #2: Add retry logic with exponential backoff
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                if attempt == 0:
-                    logger.info(f"Calling model API - waiting for response (no timeout)...")
-                else:
-                    logger.info(f"Retrying model API call (attempt {attempt + 1}/{max_retries})...")
-                
-                # NO TIMEOUT - let it take as long as needed
-                response = requests.post(f"{self.base_url}/api/process_email_complete", json=payload)
-                response.raise_for_status()
-                result = response.json()
-                
-                logger.info(f"Model API processed email: {result.get('event_type', 'unknown')}")
-                return result
-                
-            except Exception as e:
-                logger.error(f"API error (attempt {attempt + 1}/{max_retries}): {e}")
-                
-                # If this was the last attempt, use fallback
-                if attempt == max_retries - 1:
-                    logger.error(f"All {max_retries} attempts failed, using fallback response")
-                    return self._get_fallback_response()
-                
-                # Exponential backoff: 1s, 2s, 4s
-                wait_time = 2 ** attempt
-                logger.info(f"Waiting {wait_time} seconds before retry...")
-                time.sleep(wait_time)
-        
-        # Should never reach here, but just in case
-        return self._get_fallback_response()
+        try:
+            logger.info("Calling model API (60s timeout)...")
+            start_time = time.time()
+            
+            # Single 60-second timeout - no retries needed
+            response = requests.post(
+                f"{self.base_url}/api/process_email_complete", 
+                json=payload, 
+                timeout=60  # 60 seconds max
+            )
+            response.raise_for_status()
+            result = response.json()
+            
+            # Log actual processing time
+            elapsed = time.time() - start_time
+            logger.info(f"Model API completed in {elapsed:.1f}s: {result.get('event_type', 'unknown')}")
+            
+            return result
+            
+        except requests.exceptions.Timeout:
+            logger.warning(f"Model API timeout after 60s - classifying as manual_review")
+            return self._get_manual_review_fallback()
+            
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Model API request error: {e} - classifying as manual_review")
+            return self._get_manual_review_fallback()
+            
+        except Exception as e:
+            logger.error(f"Unexpected model API error: {e} - classifying as manual_review")
+            return self._get_manual_review_fallback()
 
     def generate_reply(self, subject, body, label, sender_name=None, entities=None):
-        """Generate reply - WITH SENDER NAME for personalization and RETRY LOGIC."""
+        """Generate reply - 60 second timeout, no reply if timeout."""
         if label not in RESPONSE_LABELS:
             return ""
             
@@ -136,46 +133,45 @@ class ModelAPIClient:
             "entities": entities or {}
         }
         
-        # SECURITY FIX Issue #2: Add retry logic with exponential backoff
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                if attempt == 0:
-                    logger.info(f"Generating reply for label {label} with sender: {sender_name} (no timeout)...")
-                else:
-                    logger.info(f"Retrying reply generation (attempt {attempt + 1}/{max_retries})...")
-                
-                # NO TIMEOUT - let it take as long as needed
-                response = requests.post(f"{self.base_url}/api/generate_reply", json=payload)
-                response.raise_for_status()
-                result = response.json()
-                reply = result.get("reply", "")
-                
-                logger.info(f"Reply generated for label {label}: {len(reply)} chars")
-                return reply
-                
-            except Exception as e:
-                logger.error(f"Reply generation error (attempt {attempt + 1}/{max_retries}): {e}")
-                
-                # If this was the last attempt, give up
-                if attempt == max_retries - 1:
-                    logger.error(f"All {max_retries} reply attempts failed")
-                    return ""
-                
-                # Exponential backoff: 1s, 2s, 4s
-                wait_time = 2 ** attempt
-                logger.info(f"Waiting {wait_time} seconds before retry...")
-                time.sleep(wait_time)
-        
-        # Should never reach here, but just in case
-        return ""
+        try:
+            logger.info(f"Generating reply for {label} (60s timeout)...")
+            start_time = time.time()
+            
+            # Single 60-second timeout for reply generation too
+            response = requests.post(
+                f"{self.base_url}/api/generate_reply", 
+                json=payload, 
+                timeout=60  # 60 seconds max
+            )
+            response.raise_for_status()
+            result = response.json()
+            reply = result.get("reply", "")
+            
+            # Log actual processing time
+            elapsed = time.time() - start_time
+            logger.info(f"Reply generated in {elapsed:.1f}s for {label}: {len(reply)} chars")
+            
+            return reply
+            
+        except requests.exceptions.Timeout:
+            logger.warning(f"Reply generation timeout after 60s - no reply will be generated")
+            return ""
+            
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Reply generation error: {e} - no reply will be generated")
+            return ""
+            
+        except Exception as e:
+            logger.error(f"Unexpected reply error: {e} - no reply will be generated")
+            return ""
 
-    def _get_fallback_response(self):
-        """Fallback response when model API fails - matches test code."""
+    def _get_manual_review_fallback(self):
+        """Fallback response for failed API calls - sends to manual review."""
+        logger.info("Using manual_review fallback - email will need human review")
         return {
             "debtor_number": "",
-            "event_type": "uncategorised",
-            "target_folder": "uncategorised",
+            "event_type": "manual_review",
+            "target_folder": "manual_review",
             "reply_sent": "no_response",
             "new_contact_email": "",
             "new_contact_phone": "",
@@ -302,7 +298,7 @@ class MSGraphClient:
     def fetch_unread_emails_from_account(self, email_address, max_emails):
         """Fetch unread emails from a single account - OLDEST FIRST like test code."""
         params = {
-            "$orderby": "receivedDateTime asc",  # OLDEST FIRST (like test code)
+            "$orderby": "receivedDateTime asc",  # ✅ OLDEST FIRST (like test code)
             "$filter": "isRead eq false and isDraft eq false",
             "$select": "id,subject,from,body,bodyPreview,uniqueBody,receivedDateTime,hasAttachments,toRecipients,ccRecipients,internetMessageHeaders,conversationId",
             "$top": max_emails
@@ -542,11 +538,10 @@ class MSGraphClient:
         return folder_map
 
 class EmailProcessor:
-    """Main email processing logic with UNIFIED stop signal."""
+    """Main email processing logic - simplified based on test code."""
     
-    def __init__(self, batch_id, stop_event=None):
+    def __init__(self, batch_id):
         self.batch_id = batch_id
-        self.stop_event = stop_event or threading.Event()
         self.mongo = get_mongo()
         self.model_api = ModelAPIClient()
         self.graph_client = MSGraphClient()
@@ -557,10 +552,10 @@ class EmailProcessor:
             self.mongo.set_batch_id(batch_id)
     
     def _process_single_email(self, msg):
-        """Process a single email with UNIFIED stop signal."""
-        # CHECK UNIFIED STOP BEFORE PROCESSING EACH EMAIL
-        if self.stop_event.is_set():
-            logger.info("STOP: Stop signal detected during email processing - stopping NOW")
+        """Process a single email - based on working test code logic with IMMEDIATE stop support."""
+        # ✅ CHECK STOP BEFORE PROCESSING EACH EMAIL
+        if os.path.exists("/tmp/stop_email_processor"):
+            logger.info("IMMEDIATE STOP: Stop signal detected during email processing - stopping NOW")
             return False
         
         message_id = msg.get("id", "unknown")
@@ -605,9 +600,9 @@ class EmailProcessor:
             logger.info(f"Skipping duplicate email by message_id: {message_id}")
             return True
         
-        # CHECK UNIFIED STOP BEFORE MODEL API CALL
-        if self.stop_event.is_set():
-            logger.info("STOP: Stop signal detected before model API call - stopping NOW")
+        # ✅ CHECK STOP BEFORE MODEL API CALL
+        if os.path.exists("/tmp/stop_email_processor"):
+            logger.info("IMMEDIATE STOP: Stop signal detected before model API call - stopping NOW")
             return False
         
         # Call model API
@@ -620,9 +615,9 @@ class EmailProcessor:
             had_threads=had_threads
         )
         
-        # CHECK UNIFIED STOP AFTER MODEL API CALL
-        if self.stop_event.is_set():
-            logger.info("STOP: Stop signal detected after model API call - stopping NOW")
+        # ✅ CHECK STOP AFTER MODEL API CALL
+        if os.path.exists("/tmp/stop_email_processor"):
+            logger.info("IMMEDIATE STOP: Stop signal detected after model API call - stopping NOW")
             return False
         
         # Get model fields
@@ -643,27 +638,27 @@ class EmailProcessor:
         
         logger.info(f"Model classified email as: {event_type}")
         
-        # Generate threaded reply if needed
+        # ✅ Generate threaded reply if needed - LIKE TEST CODE
         reply_text = ""
         draft_created = False
         draft_id = None
         
         if event_type in RESPONSE_LABELS:
-            # CHECK UNIFIED STOP BEFORE REPLY GENERATION
-            if self.stop_event.is_set():
-                logger.info("STOP: Stop signal detected before reply generation - stopping NOW")
+            # ✅ CHECK STOP BEFORE REPLY GENERATION
+            if os.path.exists("/tmp/stop_email_processor"):
+                logger.info("IMMEDIATE STOP: Stop signal detected before reply generation - stopping NOW")
                 return False
                 
             reply_text = self.model_api.generate_reply(
                 subject=subject,
                 body=clean_body, 
                 label=event_type,
-                sender_name=sender_name
+                sender_name=sender_name  # ✅ ADD SENDER NAME ONLY FOR REPLY
             )
             
-            # CHECK UNIFIED STOP AFTER REPLY GENERATION
-            if self.stop_event.is_set():
-                logger.info("STOP: Stop signal detected after reply generation - stopping NOW")
+            # ✅ CHECK STOP AFTER REPLY GENERATION
+            if os.path.exists("/tmp/stop_email_processor"):
+                logger.info("IMMEDIATE STOP: Stop signal detected after reply generation - stopping NOW")
                 return False
                 
             if reply_text:
@@ -678,9 +673,9 @@ class EmailProcessor:
                 else:
                     logger.warning(f"Threaded draft save failed")
         
-        # CHECK UNIFIED STOP BEFORE MONGODB STORAGE
-        if self.stop_event.is_set():
-            logger.info("STOP: Stop signal detected before MongoDB storage - stopping NOW")
+        # ✅ CHECK STOP BEFORE MONGODB STORAGE
+        if os.path.exists("/tmp/stop_email_processor"):
+            logger.info("IMMEDIATE STOP: Stop signal detected before MongoDB storage - stopping NOW")
             return False
         
         # Build email data for MongoDB
@@ -715,8 +710,8 @@ class EmailProcessor:
             "prediction": event_type,
             "response": reply_text,
             "response_sent": False if reply_text else None,
-            "draft_created": draft_created,
-            "draft_id": draft_id,
+            "draft_created": draft_created,  # ✅ Track draft creation
+            "draft_id": draft_id,            # ✅ Track draft ID
             "batch_id": self.batch_id,
             "data_source": data_source,
             "had_threads": had_threads,
@@ -730,12 +725,12 @@ class EmailProcessor:
             if result:
                 logger.info(f"Email {message_id} stored in MongoDB")
         
-        # CHECK UNIFIED STOP BEFORE FOLDER OPERATIONS
-        if self.stop_event.is_set():
-            logger.info("STOP: Stop signal detected before folder operations - stopping NOW")
+        # ✅ CHECK STOP BEFORE FOLDER OPERATIONS
+        if os.path.exists("/tmp/stop_email_processor"):
+            logger.info("IMMEDIATE STOP: Stop signal detected before folder operations - stopping NOW")
             return False
         
-        # Move to folder and track message ID properly
+        # ✅ Move to folder and track message ID properly - LIKE TEST CODE
         folder_mapping = self.folder_mappings.get(source_account, {})
         folder_id = folder_mapping.get(event_type)
         msg_id_for_read = message_id  # Start with original ID
@@ -744,12 +739,20 @@ class EmailProcessor:
             try:
                 success, new_id = self.graph_client.move_email_to_folder(message_id, folder_id, source_account)
                 if success and new_id != message_id:
-                    msg_id_for_read = new_id  # Use new ID for subsequent operations
+                    msg_id_for_read = new_id  # ✅ Use new ID for subsequent operations
                     # Update MongoDB with new ID
                     if self.mongo:
                         self.mongo.update_message_id(message_id, new_id)
             except Exception as e:
                 logger.warning(f"Failed to move email: {e}")
+        
+        # ✅ Mark as read using the correct message ID - LIKE TEST CODE
+        try:
+            is_read = event_type not in ["manual_review", "uncategorised"]
+            if is_read:
+                self.graph_client.mark_email_read(msg_id_for_read, source_account, is_read)
+        except Exception as e:
+            logger.warning(f"Failed to mark as read: {e}")
         
         return True
             
@@ -772,24 +775,19 @@ class EmailProcessor:
         
         if not emails:
             logger.info("No emails to process - this is normal, not an error")
-            # STILL sync to PostgreSQL even with 0 emails (batch tracking)
+            # ✅ STILL sync to PostgreSQL even with 0 emails (batch tracking)
             if self.mongo:
                 synced = self.mongo.sync_batch_emails_to_postgres(self.batch_id)
                 logger.info(f"Synced {synced} emails to PostgreSQL")
-            return True, 0, 0  # Success with 0 emails processed
+            return True, 0, 0  # ✅ Success with 0 emails processed
         
-        # Process whatever emails we have (1, 5, 30, 120 - doesn't matter)
+        # ✅ Process whatever emails we have (1, 5, 30, 120 - doesn't matter)
         processed = 0
         failed = 0
         
         logger.info(f"Processing {len(emails)} emails...")
         
         for email in emails:
-            # CHECK UNIFIED STOP BEFORE PROCESSING EACH EMAIL IN BATCH
-            if self.stop_event.is_set():
-                logger.info("STOP: Stop signal detected during batch processing - stopping NOW")
-                break
-                
             try:
                 if self._process_single_email(email):
                     processed += 1
@@ -798,10 +796,10 @@ class EmailProcessor:
             except Exception as e:
                 logger.error(f"Error processing email {email.get('id', 'unknown')}: {e}")
                 failed += 1
-                # CONTINUE PROCESSING OTHER EMAILS - like test code
+                # ✅ CONTINUE PROCESSING OTHER EMAILS - like test code
                 continue
         
-        # ALWAYS sync to PostgreSQL (whether we have 1 email or 100)
+        # ✅ ALWAYS sync to PostgreSQL (whether we have 1 email or 100)
         if self.mongo:
             synced = self.mongo.sync_batch_emails_to_postgres(self.batch_id)
             logger.info(f"Synced {synced} emails to PostgreSQL")
@@ -809,9 +807,9 @@ class EmailProcessor:
         logger.info(f"Batch {self.batch_id} complete: {processed} processed, {failed} failed")
         return True, processed, failed
 
-def process_unread_emails(batch_id, batch_size=30, stop_event=None):
-    """Process unread emails with UNIFIED stop signal."""
-    processor = EmailProcessor(batch_id, stop_event)
+def process_unread_emails(batch_id, batch_size=30):
+    """Process unread emails - main entry point."""
+    processor = EmailProcessor(batch_id)
     success, processed, failed = processor.process_batch(batch_size)
     
     return {
@@ -872,4 +870,122 @@ def retry_failed_batch(batch_id, batch_size=30):
         return True
     else:
         logger.warning(f"Retry failed for batch {batch_id}")
+        return False
+
+def generate_daily_report():
+    """
+    Simple daily report function - counts emails processed and sends basic stats.
+    Add this function to your fetch_reply.py file.
+    """
+    from datetime import datetime, timedelta
+    import httpx
+    
+    # Report recipients - UPDATE THESE WITH YOUR ACTUAL EMAILS
+    report_emails = [
+        "sanskar.gawande@cadex-solutions.com",      # Replace with actual email 1
+        "yogesh.patel@cadex-solutions.com"    # Replace with actual email 2
+    ]
+    
+    try:
+        # Get yesterday's date
+        yesterday = datetime.now() - timedelta(days=1)
+        start_date = yesterday.replace(hour=0, minute=0, second=0, microsecond=0)
+        end_date = start_date + timedelta(days=1)
+        
+        logger.info(f"Generating daily report for: {start_date.strftime('%Y-%m-%d')}")
+        
+        # Get MongoDB connection
+        mongo = get_mongo()
+        if not mongo:
+            logger.error("No MongoDB connection for report")
+            return False
+        
+        # Query emails processed yesterday
+        query = {
+            "processed_at": {
+                "$gte": start_date.isoformat(),
+                "$lt": end_date.isoformat()
+            }
+        }
+        
+        emails = list(mongo.collection.find(query))
+        
+        # Simple counting
+        total_emails = len(emails)
+        replies_generated = 0
+        label_counts = {}
+        
+        # Count everything
+        for email in emails:
+            # Count replies
+            if email.get("response", ""):
+                replies_generated += 1
+            
+            # Count by label
+            label = email.get("event_type", "unknown")
+            label_counts[label] = label_counts.get(label, 0) + 1
+        
+        # Create simple text report
+        report_text = f"""Daily Email Processing Report - {start_date.strftime('%Y-%m-%d')}
+
+Total Emails Processed: {total_emails}
+Replies Generated: {replies_generated}
+
+Processing by Label:
+"""
+        
+        # Add label counts
+        for label, count in sorted(label_counts.items()):
+            report_text += f"- {label}: {count} emails\n"
+        
+        report_text += f"""
+Report generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+"""
+        
+        logger.info(f"Report ready: {total_emails} emails, {replies_generated} replies")
+        
+        # Send email using Graph API
+        return send_simple_report_email(report_text, start_date.strftime('%Y-%m-%d'), report_emails)
+        
+    except Exception as e:
+        logger.error(f"Error generating daily report: {e}")
+        return False
+
+def send_simple_report_email(report_text, report_date, recipients):
+    """Send simple text email report."""
+    try:
+        # Create MSGraphClient to get access token
+        graph_client = MSGraphClient()
+        access_token = graph_client.get_access_token()
+        
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json"
+        }
+        
+        # Rest of the function stays the same...
+        to_recipients = [{"emailAddress": {"address": email}} for email in recipients]
+        subject = f"Daily Email Report - {report_date}"
+        
+        message = {
+            "subject": subject,
+            "body": {"contentType": "Text", "content": report_text},
+            "toRecipients": to_recipients,
+            "importance": "Normal"
+        }
+        
+        payload = {"message": message, "saveToSentItems": "true"}
+        endpoint = f"{MS_GRAPH_BASE_URL}/users/{EMAIL_ADDRESS.split(',')[0].strip()}/sendMail"
+        
+        response = httpx.post(endpoint, headers=headers, json=payload, timeout=30)
+        
+        if response.status_code in [200, 202]:
+            logger.info(f"Daily report sent to {len(recipients)} recipients")
+            return True
+        else:
+            logger.error(f"Failed to send report: {response.status_code}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"Error sending report email: {e}")
         return False

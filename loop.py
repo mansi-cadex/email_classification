@@ -1,13 +1,12 @@
 """
 loop.py - Batch processing and orchestration for email classification system
 
-Updated with UNIFIED signal handling for Issue #6:
+Updated based on test code approach:
 1. Orchestration and scheduling
 2. Excel export using model data  
 3. Database batch management
 4. No email_sender dependencies (replies handled in fetch_reply.py)
 5. Simple draft counting from MongoDB
-6. UNIFIED threading-based stop mechanism
 """
 
 import os
@@ -15,7 +14,8 @@ import sys
 import time
 import uuid
 import io
-import threading
+import httpx
+import msal
 import pandas as pd
 import requests 
 import paramiko 
@@ -26,7 +26,7 @@ from dotenv import load_dotenv
 from typing import Tuple, Dict, List, Optional, Any
 
 # Import from refactored modules
-from src.fetch_reply import process_unread_emails
+from src.fetch_reply import process_unread_emails, generate_daily_report
 from src.db import get_mongo, get_postgres, PostgresConnector
 from src.log_config import logger
 
@@ -43,12 +43,18 @@ SFTP_PORT = int(os.getenv("SFTP_PORT", "22"))
 SFTP_USERNAME = os.getenv("SFTP_USERNAME")
 SFTP_PASSWORD = os.getenv("SFTP_PASSWORD")
 SFTP_ENABLED = os.getenv("SFTP_ENABLED", "False").lower() in ["true", "yes", "1"]
+_last_report_date = None
+# Environment variables for Microsoft Graph API (needed for alerts)
+CLIENT_ID = os.getenv("CLIENT_ID")
+CLIENT_SECRET = os.getenv("CLIENT_SECRET")
+TENANT_ID = os.getenv("TENANT_ID")
+EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS")
 
 def check_model_health() -> bool:
     """Check if model API is available and responding"""
     try:
         model_url = "http://34.26.80.201:8000"
-        response = requests.get(f"{model_url}/api/health", timeout=10)  # <- CHANGE THIS LINE
+        response = requests.get(f"{model_url}/api/health", timeout=10)
         if response.status_code == 200:
             return True
         else:
@@ -73,33 +79,17 @@ def get_batch_interval():
     minutes = int(os.getenv("BATCH_INTERVAL_MINUTES", 10))
     return minutes * 60  # Convert to seconds
 
-def wait_for_model_recovery(stop_event, max_retries=3):
-    """Wait for model to come back online - UNIFIED stop signal."""
-    logger.info(f"Waiting for model to recover (max {max_retries} attempts)...")
+def wait_for_model_recovery():
+    """Wait for model to come back online"""
+    logger.info("Waiting for model to recover...")
     
-    for attempt in range(max_retries):
-        # Check unified stop signal
-        if stop_event.is_set():
-            logger.info("STOP: Stop signal detected during model recovery - stopping NOW")
-            return False
-            
+    while True:
         if check_model_health():
-            logger.info(f"Model recovered after {attempt + 1} attempts - resuming processing")
-            return True
+            logger.info("Model recovered - resuming processing")
+            break
         else:
-            # Exponential backoff: 60s, 120s, 240s
-            wait_time = 60 * (2 ** attempt)
-            logger.info(f"Model still down - waiting {wait_time}s before retry (attempt {attempt + 1}/{max_retries})")
-            
-            # Check stop signal during wait with 1-second intervals
-            for i in range(wait_time):
-                if stop_event.is_set():
-                    logger.info("STOP: Stop signal detected during model recovery wait - stopping NOW")
-                    return False
-                time.sleep(1)
-    
-    logger.error(f"Model failed to recover after {max_retries} attempts - giving up")
-    return False
+            logger.info("Model still down - checking again in 60 seconds")
+            time.sleep(60)
 
 def check_incomplete_batch():
     """Check if there's an incomplete batch to resume"""
@@ -278,19 +268,15 @@ def update_batch_id_only(batch_id, email_data=None):
             PostgresConnector.return_connection(conn)
 
 def upload_to_sftp(filename: str, file_content: Optional[bytes] = None, 
-                  max_retries: int = 3, retry_delay: int = 5, stop_event=None) -> bool:
-    """Upload file to SFTP server with UNIFIED stop signal checks."""
+                  max_retries: int = 3, retry_delay: int = 5) -> bool:
+    """Upload file to SFTP server with stop signal checks."""
     if not SFTP_ENABLED:
         logger.info(f"SFTP disabled - skipping upload of {filename}")
         return False
     
-    # Create default stop event if not provided
-    if stop_event is None:
-        stop_event = threading.Event()
-    
-    # CHECK UNIFIED STOP BEFORE SFTP
-    if stop_event.is_set():
-        logger.info("STOP: Stop signal detected before SFTP upload - stopping NOW")
+    # ✅ CHECK STOP BEFORE SFTP
+    if os.path.exists("/tmp/stop_email_processor"):
+        logger.info("IMMEDIATE STOP: Stop signal detected before SFTP upload - stopping NOW")
         return False
     
     # Create unique filename to prevent overwrites
@@ -310,9 +296,9 @@ def upload_to_sftp(filename: str, file_content: Optional[bytes] = None,
     
     retries = 0
     while retries < max_retries:
-        # CHECK UNIFIED STOP DURING SFTP RETRIES
-        if stop_event.is_set():
-            logger.info("STOP: Stop signal detected during SFTP retry - stopping NOW")
+        # ✅ CHECK STOP DURING SFTP RETRIES
+        if os.path.exists("/tmp/stop_email_processor"):
+            logger.info("IMMEDIATE STOP: Stop signal detected during SFTP retry - stopping NOW")
             # Clean up temp file
             if temp_filename and os.path.exists(temp_filename):
                 os.remove(temp_filename)
@@ -335,9 +321,9 @@ def upload_to_sftp(filename: str, file_content: Optional[bytes] = None,
                 allow_agent=False
             )
             
-            # CHECK UNIFIED STOP AFTER SFTP CONNECTION
-            if stop_event.is_set():
-                logger.info("STOP: Stop signal detected during SFTP connection - stopping NOW")
+            # ✅ CHECK STOP AFTER SFTP CONNECTION
+            if os.path.exists("/tmp/stop_email_processor"):
+                logger.info("IMMEDIATE STOP: Stop signal detected during SFTP connection - stopping NOW")
                 if temp_filename and os.path.exists(temp_filename):
                     os.remove(temp_filename)
                 return False
@@ -392,10 +378,10 @@ def upload_to_sftp(filename: str, file_content: Optional[bytes] = None,
             current_delay = retry_delay * (2 ** (retries - 1))
             logger.info(f"Retrying SFTP upload in {current_delay} seconds...")
             
-            # CHECK UNIFIED STOP DURING SFTP RETRY DELAY
+            # ✅ CHECK STOP DURING SFTP RETRY DELAY
             for i in range(current_delay):
-                if stop_event.is_set():
-                    logger.info("STOP: Stop signal detected during SFTP retry delay - stopping NOW")
+                if os.path.exists("/tmp/stop_email_processor"):
+                    logger.info("IMMEDIATE STOP: Stop signal detected during SFTP retry delay - stopping NOW")
                     if temp_filename and os.path.exists(temp_filename):
                         os.remove(temp_filename)
                     return False
@@ -408,14 +394,10 @@ def upload_to_sftp(filename: str, file_content: Optional[bytes] = None,
     logger.info(f"Failed to upload {filename} to SFTP after {max_retries} attempts")
     return False
 
-def export_processed_emails_to_excel(batch_id: str, stop_event=None) -> Optional[str]:
-    """Export processed emails to Excel using MODEL DATA with UNIFIED stop signal and formula injection protection."""
+def export_processed_emails_to_excel(batch_id: str) -> Optional[str]:
+    """Export processed emails to Excel using MODEL DATA - like test code."""
     if not batch_id:
         return None
-    
-    # Create default stop event if not provided
-    if stop_event is None:
-        stop_event = threading.Event()
 
     mongo = get_mongo()
     if not mongo:
@@ -449,67 +431,23 @@ def export_processed_emails_to_excel(batch_id: str, stop_event=None) -> Optional
         target_folder_raw = e.get("target_folder", "")
         reply_sent = e.get("reply_sent", "no_response")
         
-        # SECURITY FIX: Excel formula injection protection - sanitize all string fields
-        sender = e.get("sender", "")
-        if sender and sender.startswith(('=', '@', '+', '-', '\t', '\r')):
-            sender = "'" + sender
-            
-        recipient = e.get("recipient", e.get("to", ""))
-        if recipient and recipient.startswith(('=', '@', '+', '-', '\t', '\r')):
-            recipient = "'" + recipient
-            
-        subject = e.get("subject", "")
-        if subject and subject.startswith(('=', '@', '+', '-', '\t', '\r')):
-            subject = "'" + subject
-            
-        if email_body and email_body.startswith(('=', '@', '+', '-', '\t', '\r')):
-            email_body = "'" + email_body
-            
-        if event_type_raw and event_type_raw.startswith(('=', '@', '+', '-', '\t', '\r')):
-            event_type_raw = "'" + event_type_raw
-            
-        if target_folder_raw and target_folder_raw.startswith(('=', '@', '+', '-', '\t', '\r')):
-            target_folder_raw = "'" + target_folder_raw
-            
-        if reply_sent and reply_sent.startswith(('=', '@', '+', '-', '\t', '\r')):
-            reply_sent = "'" + reply_sent
-            
-        if cleaned_body and cleaned_body.startswith(('=', '@', '+', '-', '\t', '\r')):
-            cleaned_body = "'" + cleaned_body
-            
-        debtor_number = e.get("debtor_number", "")
-        if debtor_number and debtor_number.startswith(('=', '@', '+', '-', '\t', '\r')):
-            debtor_number = "'" + debtor_number
-            
-        new_contact_email = e.get("new_contact_email", "")
-        if new_contact_email and new_contact_email.startswith(('=', '@', '+', '-', '\t', '\r')):
-            new_contact_email = "'" + new_contact_email
-            
-        new_contact_phone = e.get("new_contact_phone", "")
-        if new_contact_phone and new_contact_phone.startswith(('=', '@', '+', '-', '\t', '\r')):
-            new_contact_phone = "'" + new_contact_phone
-            
-        contact_status = e.get("contact_status", "active")
-        if contact_status and contact_status.startswith(('=', '@', '+', '-', '\t', '\r')):
-            contact_status = "'" + contact_status
-        
         row = {
-            # CLIENT DATA - Basic email metadata (SANITIZED)
-            "EmailFrom": sender,
-            "EmailTo": recipient,
-            "SubjectLine": subject,
-            "Date": e.get("received_at", e.get("date", "")),  # Date fields are safe
+            # CLIENT DATA - Basic email metadata
+            "EmailFrom": e.get("sender", ""),
+            "EmailTo": e.get("recipient", e.get("to", "")),
+            "SubjectLine": e.get("subject", ""),
+            "Date": e.get("received_at", e.get("date", "")),
             "Body": email_body,
             
-            # MODEL DATA - RAW format (SANITIZED)
+            # MODEL DATA - RAW format like test code
             "Event Type": event_type_raw,
             "TargetFolder": target_folder_raw,
             "ReplySent": reply_sent,
-            "CleanedBody": cleaned_body,
-            "PrimaryFileNumber": debtor_number,
-            "NewContactEmail": new_contact_email,
-            "NewContactPhone": new_contact_phone,
-            "ContactStatus": contact_status
+            "CleanedBody": cleaned_body,  # ✅ ADD CLEANED BODY like test code
+            "PrimaryFileNumber": e.get("debtor_number", ""),
+            "NewContactEmail": e.get("new_contact_email", ""),
+            "NewContactPhone": e.get("new_contact_phone", ""),
+            "ContactStatus": e.get("contact_status", "active")
         }
         
         rows.append(row)
@@ -540,22 +478,18 @@ def export_processed_emails_to_excel(batch_id: str, stop_event=None) -> Optional
     df.to_excel(buf, index=False)
     buf.seek(0)
     
-    logger.info(f"Excel export complete: {len(emails)} emails processed for batch {batch_id} (13 columns, formula injection protected)")
+    logger.info(f"Excel export complete: {len(emails)} emails processed for batch {batch_id} (13 columns)")
     
-    # Upload to SFTP with stop signal
-    upload_success = upload_to_sftp(fname, buf.getvalue(), stop_event=stop_event)
+    # Upload to SFTP
+    upload_success = upload_to_sftp(fname, buf.getvalue())
     
     if upload_success:
         logger.info(f"Excel file exported and uploaded: {fname}")
     
     return fname if upload_success else None
 
-def process_batch(batch_id: Optional[str] = None, stop_event=None) -> Tuple[bool, int, int, int]:
-    """Process one batch of emails with UNIFIED stop signal."""
-    # Create default stop event if not provided
-    if stop_event is None:
-        stop_event = threading.Event()
-        
+def process_batch(batch_id: Optional[str] = None) -> Tuple[bool, int, int, int]:
+    """Process one batch of emails - simplified without email_sender dependencies."""
     start_time = time.time()
     
     # Get current batch size
@@ -573,8 +507,8 @@ def process_batch(batch_id: Optional[str] = None, stop_event=None) -> Tuple[bool
     # Ensure batch record exists
     ensure_batch_record_exists(batch_id)
 
-    # Process emails with stop signal
-    email_result = process_unread_emails(batch_id, batch_size, stop_event)
+    # ✅ Process emails (replies are created during processing in fetch_reply.py)
+    email_result = process_unread_emails(batch_id, batch_size)
     
     if not email_result["success"]:
         # Update batch status to failed
@@ -602,9 +536,11 @@ def process_batch(batch_id: Optional[str] = None, stop_event=None) -> Tuple[bool
     failed_count = email_result.get("emails_errored", 0)
     batch_id = email_result.get("batch_id", batch_id)
 
-    # Count drafts created during processing
+    # ✅ Count drafts created during processing - like test code
     draft_count = count_drafts_created(batch_id)
     logger.info(f"Drafts created during processing: {draft_count}")
+    
+    # ✅ No separate email sending step - it happens during processing
     
     # Calculate totals
     total_processed = processed_count
@@ -651,12 +587,8 @@ def process_batch(batch_id: Optional[str] = None, stop_event=None) -> Tuple[bool
     
     return True, total_processed, total_failed, total_draft_count
 
-def run_batch_processor(stop_event=None) -> bool:
-    """Run a single batch processing cycle with UNIFIED stop signal."""
-    # Create default stop event if not provided
-    if stop_event is None:
-        stop_event = threading.Event()
-    
+def run_batch_processor() -> bool:
+    """Run a single batch processing cycle with resumption logic."""
     logger.info(f"Starting batch processor run")
     
     # Get current batch size
@@ -685,36 +617,160 @@ def run_batch_processor(stop_event=None) -> bool:
    
     ensure_batch_record_exists(batch_id)
    
-    # Pass stop_event to process_batch
-    success, processed_count, failed_count, draft_count = process_batch(batch_id, stop_event)
+    success, processed_count, failed_count, draft_count = process_batch(batch_id)
     
     if success:
         # Always check total count and handle appropriately
         total_count = get_batch_email_count(batch_id)
         
         if total_count > 0:
+            # ✅ Generate Excel for ANY number of emails (1, 5, 15, 30, 120, etc.)
             logger.info(f"Batch {batch_id} has {total_count} emails - generating Excel")
             mark_batch_complete(batch_id)
             
-            # Check stop before Excel generation
-            if not stop_event.is_set():
-                excel_file = export_processed_emails_to_excel(batch_id, stop_event)
-                if excel_file:
-                    logger.info(f"Excel file generated: {excel_file}")
-                else:
-                    logger.info(f"Excel generation completed (SFTP disabled or failed)")
+            # Generate Excel for ANY number of emails (including just 1 email)
+            excel_file = export_processed_emails_to_excel(batch_id)
+            if excel_file:
+                logger.info(f"Excel file generated: {excel_file}")
+            else:
+                logger.info(f"Excel generation completed (SFTP disabled or failed)")
         else:
+            # No emails processed - still mark as complete
             logger.info(f"Batch {batch_id} has no emails - marking complete, no Excel needed")
             mark_batch_complete(batch_id)
    
     return success
 
-def run_email_processor(stop_event=None):
-    """Main batch processing loop with UNIFIED stop signal."""
-    # Create default stop event if not provided (for backward compatibility)
-    if stop_event is None:
-        stop_event = threading.Event()
+ALERT_EMAILS = [
+    "sanskar.gawande@cadex-solutions.com"
+    # Add more alert emails here as needed
+]
+
+# Global variables for monitoring
+last_activity_time = datetime.now()
+last_alert_time = None
+alert_count = 0
+
+# ADD THESE FUNCTIONS before run_email_processor() function
+
+def get_alert_access_token():
+    """Get Microsoft Graph API access token for alert emails."""
+    try:
+        app = msal.ConfidentialClientApplication(
+            client_id=CLIENT_ID,
+            client_credential=CLIENT_SECRET,
+            authority=f"https://login.microsoftonline.com/{TENANT_ID}"
+        )
+        
+        result = app.acquire_token_for_client(scopes=["https://graph.microsoft.com/.default"])
+        
+        if "access_token" in result:
+            return result["access_token"]
+        else:
+            logger.error(f"Failed to acquire alert token: {result.get('error_description')}")
+            return None
+            
+    except Exception as e:
+        logger.error(f"Error getting alert access token: {e}")
+        return None
+
+def send_stuck_alert():
+    """Send alert email that system appears stuck."""
+    if not ALERT_EMAILS:
+        logger.warning("No alert emails configured")
+        return False
     
+    try:
+        # Get access token
+        access_token = get_alert_access_token()
+        if not access_token:
+            logger.error("Could not get access token for alert")
+            return False
+        
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json"
+        }
+        
+        # Calculate how long system has been stuck
+        hours_stuck = (datetime.now() - last_activity_time).total_seconds() / 3600
+        
+        # Simple alert message
+        alert_text = f"""ALERT: Email Processing System Stuck
+
+The email processing system appears to be stuck for {hours_stuck:.1f} hours.
+
+Please check the system status.
+
+Alert sent: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+"""
+        
+        # Prepare email
+        to_recipients = [{"emailAddress": {"address": email}} for email in ALERT_EMAILS]
+        subject = "ALERT: Email Processing System Stuck"
+        
+        message = {
+            "subject": subject,
+            "body": {"contentType": "Text", "content": alert_text},
+            "toRecipients": to_recipients,
+            "importance": "High"
+        }
+        
+        payload = {"message": message, "saveToSentItems": "true"}
+        from_email = EMAIL_ADDRESS.split(',')[0].strip() if EMAIL_ADDRESS else ""
+        endpoint = f"https://graph.microsoft.com/v1.0/users/{from_email}/sendMail"
+        
+        response = httpx.post(endpoint, headers=headers, json=payload, timeout=30)
+        
+        if response.status_code in [200, 202]:
+            logger.warning(f"STUCK ALERT sent to {len(ALERT_EMAILS)} recipients - system stuck for {hours_stuck:.1f} hours")
+            return True
+        else:
+            logger.error(f"Failed to send stuck alert: {response.status_code}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"Error sending stuck alert: {e}")
+        return False
+
+def check_and_send_stuck_alert():
+    """Check if system is stuck and send alerts according to schedule."""
+    global last_alert_time, alert_count
+    
+    # Calculate time since last activity
+    time_since_activity = (datetime.now() - last_activity_time).total_seconds() / 3600  # hours
+    
+    # First alert after 1 hour of inactivity
+    if time_since_activity >= 1.0 and last_alert_time is None:
+        logger.warning(f"System stuck for {time_since_activity:.1f} hours - sending first alert")
+        if send_stuck_alert():
+            last_alert_time = datetime.now()
+            alert_count = 1
+    
+    # Follow-up alerts every 2 hours after first alert
+    elif last_alert_time and time_since_activity >= (1.0 + alert_count * 2.0):
+        logger.warning(f"System stuck for {time_since_activity:.1f} hours - sending follow-up alert #{alert_count + 1}")
+        if send_stuck_alert():
+            last_alert_time = datetime.now()
+            alert_count += 1
+
+def update_activity_timestamp():
+    """Reset activity tracking - call this when system is working normally."""
+    global last_activity_time, last_alert_time, alert_count
+    
+    # Check if we're recovering from a stuck state
+    was_stuck = last_alert_time is not None
+    
+    # Reset all monitoring variables
+    last_activity_time = datetime.now()
+    last_alert_time = None
+    alert_count = 0
+    
+    if was_stuck:
+        logger.info("System activity detected - monitoring reset, alerts cleared")
+
+def run_email_processor():
+    """Main batch processing loop with IMMEDIATE stop support, daily reporting, and stuck system monitoring."""
     # Get current settings
     batch_size = get_batch_size()
     batch_interval = get_batch_interval()
@@ -729,15 +785,28 @@ def run_email_processor(stop_event=None):
     
     consecutive_failures = 0
     max_failures = 3
+    
+    # Track daily report sending
+    last_report_date = None
    
     while True:
-        # CHECK UNIFIED STOP SIGNAL
-        if stop_event.is_set():
-            logger.info("STOP: Stop signal detected - shutting down processor NOW")
+        # CHECK STUCK ALERT BEFORE PROCESSING
+        check_and_send_stuck_alert()
+        
+        # CHECK STOP SIGNAL EVERY ITERATION
+        if os.path.exists("/tmp/stop_email_processor"):
+            logger.info("IMMEDIATE STOP: Stop signal detected - shutting down processor NOW")
+            try:
+                os.remove("/tmp/stop_email_processor")
+            except:
+                pass
             break
             
         start_time = datetime.now()
         logger.info(f"Starting batch at {start_time.isoformat()}")
+        
+        # UPDATE ACTIVITY TIMESTAMP - SYSTEM IS WORKING
+        update_activity_timestamp()
        
         try:
             # Check model health before processing
@@ -746,25 +815,20 @@ def run_email_processor(stop_event=None):
                 consecutive_failures += 1
                 
                 if consecutive_failures >= max_failures:
-                    logger.info(f"Model down for {max_failures} consecutive attempts - attempting recovery")
-                    
-                    # UNIFIED stop signal passed to recovery
-                    recovery_success = wait_for_model_recovery(stop_event, max_retries=3)
-                    
-                    if recovery_success:
-                        consecutive_failures = 0
-                        logger.info("Model recovery successful - continuing processing")
-                        continue
-                    else:
-                        logger.error("Model recovery failed after maximum attempts - shutting down processor")
-                        break
+                    logger.info(f"Model down for {max_failures} consecutive attempts - waiting for recovery")
+                    wait_for_model_recovery()
+                    consecutive_failures = 0
                 else:
                     logger.info(f"Waiting 60 seconds before retry (failure {consecutive_failures}/{max_failures})")
                     
-                    # CHECK UNIFIED STOP DURING WAIT
+                    # CHECK STOP DURING WAIT
                     for i in range(60):
-                        if stop_event.is_set():
-                            logger.info("STOP: Stop signal detected during wait - shutting down NOW")
+                        if os.path.exists("/tmp/stop_email_processor"):
+                            logger.info("IMMEDIATE STOP: Stop signal detected during wait - shutting down NOW")
+                            try:
+                                os.remove("/tmp/stop_email_processor")
+                            except:
+                                pass
                             return
                         time.sleep(1)
                 continue
@@ -772,8 +836,25 @@ def run_email_processor(stop_event=None):
             # Reset failure counter on successful health check
             consecutive_failures = 0
             
-            # Run main batch processor with stop signal
-            run_batch_processor(stop_event)
+            # CHECK AND SEND DAILY REPORT (once per day at 9 AM or later)
+            current_date = datetime.now().date()
+            current_hour = datetime.now().hour
+            
+            # Send report once per day at 9 AM or later (and haven't sent today)
+            if (current_hour >= 9 and last_report_date != current_date):
+                logger.info("Time for daily report - generating and sending...")
+                try:
+                    report_success = generate_daily_report()
+                    if report_success:
+                        logger.info("Daily report sent successfully")
+                        last_report_date = current_date
+                    else:
+                        logger.error("Daily report failed to send")
+                except Exception as e:
+                    logger.error(f"Error sending daily report: {e}")
+            
+            # Run main batch processor
+            run_batch_processor()
            
             # Calculate time to next batch
             elapsed = (datetime.now() - start_time).total_seconds()
@@ -781,10 +862,14 @@ def run_email_processor(stop_event=None):
            
             logger.info(f"Batch complete. Next batch in {wait_time:.1f} seconds")
             
-            # CHECK UNIFIED STOP DURING BATCH INTERVAL WAIT
+            # CHECK STOP DURING BATCH INTERVAL WAIT
             for i in range(int(wait_time)):
-                if stop_event.is_set():
-                    logger.info("STOP: Stop signal detected during batch interval - shutting down NOW")
+                if os.path.exists("/tmp/stop_email_processor"):
+                    logger.info("IMMEDIATE STOP: Stop signal detected during batch interval - shutting down NOW")
+                    try:
+                        os.remove("/tmp/stop_email_processor")
+                    except:
+                        pass
                     return
                 time.sleep(1)
             
@@ -801,14 +886,18 @@ def run_email_processor(stop_event=None):
             consecutive_failures += 1
             logger.info(f"Waiting 60 seconds before retry due to error")
             
-            # CHECK UNIFIED STOP DURING ERROR WAIT
+            # CHECK STOP DURING ERROR WAIT
             for i in range(60):
-                if stop_event.is_set():
-                    logger.info("STOP: Stop signal detected during error wait - shutting down NOW")
+                if os.path.exists("/tmp/stop_email_processor"):
+                    logger.info("IMMEDIATE STOP: Stop signal detected during error wait - shutting down NOW")
+                    try:
+                        os.remove("/tmp/stop_email_processor")
+                    except:
+                        pass
                     return
                 time.sleep(1)
     
-    logger.info("Email processor stopped")
+    logger.info("Email processor stopped IMMEDIATELY")
 
 if __name__ == "__main__":
     try:
