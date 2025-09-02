@@ -44,22 +44,35 @@ SFTP_USERNAME = os.getenv("SFTP_USERNAME")
 SFTP_PASSWORD = os.getenv("SFTP_PASSWORD")
 SFTP_ENABLED = os.getenv("SFTP_ENABLED", "False").lower() in ["true", "yes", "1"]
 
-def check_model_health() -> bool:
-    """Check if model API is available and responding"""
-    try:
-        model_url = "http://34.26.80.201:8000"
-        response = requests.get(f"{model_url}/api/health", timeout=60)
-        if response.status_code == 200:
-            return True
-        else:
-            logger.warning(f"Model health check failed: {response.status_code}")
-            return False
-    except requests.exceptions.RequestException as e:
-        logger.warning(f"Model health check failed: {str(e)}")
-        return False
-    except Exception as e:
-        logger.warning(f"Model health check error: {str(e)}")
-        return False
+def check_model_health(max_retries: int = 3, base_timeout: int = 60) -> bool:
+    """Robust model health check with retries and backoff."""
+    model_url = "http://34.26.80.201:8000/api/health"
+
+    for attempt in range(max_retries):
+        try:
+            # Increase timeout per retry: 60s → 120s → 180s
+            timeout = base_timeout * (attempt + 1)
+            response = requests.get(model_url, timeout=timeout)
+
+            if response.status_code == 200:
+                logger.info(f"Model health check passed on attempt {attempt+1}")
+                return True
+            else:
+                logger.warning(f"Model health check failed (HTTP {response.status_code})")
+
+        except requests.exceptions.Timeout:
+            logger.warning(f"Model health check timeout (attempt {attempt+1}/{max_retries}, timeout={timeout}s)")
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"Model health check error (attempt {attempt+1}/{max_retries}): {str(e)}")
+
+        # Exponential backoff: 5s, 10s, 20s
+        wait_time = 5 * (2 ** attempt)
+        logger.info(f"Retrying health check in {wait_time}s...")
+        time.sleep(wait_time)
+
+    logger.error("Model health check failed after all retries")
+    return False
+
 
 def get_batch_size():
     """Get batch size from runtime override or .env"""
