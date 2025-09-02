@@ -142,7 +142,7 @@ def log_startup_config():
     logger.info("=== Email Processing System Starting ===")
     
     # Log model configuration  
-    model_url = os.getenv("MODEL_API_URL", "http://34.72.113.155:8000")
+    model_url = "http://34.26.80.201:8000"
     logger.info(f"Model API URL: {model_url}")
     
     # Log email configuration

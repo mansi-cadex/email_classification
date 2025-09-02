@@ -48,7 +48,7 @@ def check_model_health() -> bool:
     """Check if model API is available and responding"""
     try:
         model_url = "http://34.26.80.201:8000"
-        response = requests.get(f"{model_url}/api/health", timeout=10)
+        response = requests.get(f"{model_url}/api/health", timeout=60)
         if response.status_code == 200:
             return True
         else:
@@ -724,7 +724,7 @@ def run_email_processor(stop_event=None):
     logger.info(f"Force drafts is {'ENABLED' if FORCE_DRAFTS else 'DISABLED'}")
     logger.info(f"SFTP export is {'ENABLED' if SFTP_ENABLED else 'DISABLED'}")
     
-    model_url = os.getenv("MODEL_API_URL", "http://localhost:8000")
+    model_url = "http://34.26.80.201:8000"
     logger.info(f"Model API URL: {model_url}")
     
     consecutive_failures = 0
