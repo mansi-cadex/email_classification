@@ -98,7 +98,7 @@ class ModelAPIClient:
             response = requests.post(
                 f"{self.base_url}/api/process_email_complete", 
                 json=payload, 
-                timeout=60  # 60 seconds max
+                timeout=180  # 60 seconds max
             )
             response.raise_for_status()
             result = response.json()
