@@ -731,8 +731,7 @@ def run_batch_processor(stop_event=None) -> bool:
     return success
 
 ALERT_EMAILS = [
-    "sanskar.gawande@cadex-solutions.com",
-    "yogesh.patel@cadex-solutions.com"
+    "sanskar.gawande@cadex-solutions.com"
     # Add more alert emails here as needed
 ]
 
