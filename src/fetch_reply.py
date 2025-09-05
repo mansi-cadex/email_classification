@@ -873,25 +873,39 @@ def retry_failed_batch(batch_id, batch_size=30):
 
 def generate_daily_report():
     """
-    Simple daily report function - counts emails processed and sends basic stats.
-    Add this function to your fetch_reply.py file.
+    Generate daily report at 12:00 AM ET for the previous day.
+    Updated per Yogesh's requirements for ET timezone and Susan as recipient.
     """
     from datetime import datetime, timedelta
+    import pytz
     import httpx
     
-    # Report recipients - UPDATE THESE WITH YOUR ACTUAL EMAILS
+    # Report recipients - UPDATED with Susan per Yogesh's request
     report_emails = [
         "sanskar.gawande@cadex-solutions.com",
         "yogesh.patel@cadex-solutions.com"
     ]
     
     try:
-        # Get yesterday's date
-        yesterday = datetime.now() - timedelta(days=1)
-        start_date = yesterday.replace(hour=0, minute=0, second=0, microsecond=0)
-        end_date = start_date + timedelta(days=1)
+        # Get Eastern Time zone
+        et_tz = pytz.timezone('US/Eastern')
         
-        logger.info(f"Generating daily report for: {start_date.strftime('%Y-%m-%d')}")
+        # Get current time in Eastern Time
+        now_et = datetime.now(et_tz)
+        
+        # Calculate previous day in ET (report covers the day that just ended)
+        yesterday_et = now_et - timedelta(days=1)
+        
+        # Convert to UTC for MongoDB query (MongoDB stores in UTC)
+        start_date_et = yesterday_et.replace(hour=0, minute=0, second=0, microsecond=0)
+        end_date_et = start_date_et + timedelta(days=1)
+        
+        # Convert ET times to UTC for database query
+        start_date_utc = start_date_et.astimezone(pytz.UTC).replace(tzinfo=None)
+        end_date_utc = end_date_et.astimezone(pytz.UTC).replace(tzinfo=None)
+        
+        logger.info(f"Generating daily report for: {yesterday_et.strftime('%Y-%m-%d')} ET")
+        logger.info(f"UTC query range: {start_date_utc} to {end_date_utc}")
         
         # Get MongoDB connection
         mongo = get_mongo()
@@ -899,59 +913,92 @@ def generate_daily_report():
             logger.error("No MongoDB connection for report")
             return False
         
-        # Query emails processed yesterday
+        # Query emails processed yesterday (in ET timezone)
         query = {
             "processed_at": {
-                "$gte": start_date.isoformat(),
-                "$lt": end_date.isoformat()
+                "$gte": start_date_utc.isoformat(),
+                "$lt": end_date_utc.isoformat()
             }
         }
         
         emails = list(mongo.collection.find(query))
         
-        # Simple counting
+        # Enhanced counting and analysis
         total_emails = len(emails)
         replies_generated = 0
+        drafts_created = 0
         label_counts = {}
+        account_counts = {}
         
-        # Count everything
+        # Count everything with more detail
         for email in emails:
             # Count replies
             if email.get("response", ""):
                 replies_generated += 1
             
+            # Count drafts created
+            if email.get("draft_created", False):
+                drafts_created += 1
+            
             # Count by label
             label = email.get("event_type", "unknown")
             label_counts[label] = label_counts.get(label, 0) + 1
+            
+            # Count by source account
+            account = email.get("source_account", "unknown")
+            account_counts[account] = account_counts.get(account, 0) + 1
         
-        # Create simple text report
-        report_text = f"""Daily Email Processing Report - {start_date.strftime('%Y-%m-%d')}
+        # Create enhanced text report with ET timezone
+        report_text = f"""Daily Email Processing Report - {yesterday_et.strftime('%Y-%m-%d')} (Eastern Time)
 
+=== SUMMARY ===
 Total Emails Processed: {total_emails}
 Replies Generated: {replies_generated}
+Drafts Created: {drafts_created}
 
-Processing by Label:
+=== PROCESSING BY CLASSIFICATION ===
 """
         
-        # Add label counts
-        for label, count in sorted(label_counts.items()):
-            report_text += f"- {label}: {count} emails\n"
+        # Add label counts (sorted by count, descending)
+        for label, count in sorted(label_counts.items(), key=lambda x: x[1], reverse=True):
+            percentage = (count / total_emails * 100) if total_emails > 0 else 0
+            report_text += f"- {label.replace('_', ' ').title()}: {count} emails ({percentage:.1f}%)\n"
         
         report_text += f"""
-Report generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+=== PROCESSING BY EMAIL ACCOUNT ===
 """
         
-        logger.info(f"Report ready: {total_emails} emails, {replies_generated} replies")
+        # Add account counts
+        for account, count in sorted(account_counts.items(), key=lambda x: x[1], reverse=True):
+            percentage = (count / total_emails * 100) if total_emails > 0 else 0
+            report_text += f"- {account}: {count} emails ({percentage:.1f}%)\n"
+        
+        # Add response rate analysis
+        response_rate = (replies_generated / total_emails * 100) if total_emails > 0 else 0
+        draft_rate = (drafts_created / total_emails * 100) if total_emails > 0 else 0
+        
+        report_text += f"""
+=== RESPONSE ANALYSIS ===
+Response Rate: {response_rate:.1f}% ({replies_generated}/{total_emails})
+Draft Creation Rate: {draft_rate:.1f}% ({drafts_created}/{total_emails})
+
+=== REPORT INFO ===
+Report Date: {yesterday_et.strftime('%Y-%m-%d')} (Eastern Time)
+Report Generated: {now_et.strftime('%Y-%m-%d %I:%M:%S %p %Z')}
+Coverage: 12:00 AM - 11:59 PM ET
+"""
+        
+        logger.info(f"Report ready: {total_emails} emails, {replies_generated} replies, {drafts_created} drafts")
         
         # Send email using Graph API
-        return send_simple_report_email(report_text, start_date.strftime('%Y-%m-%d'), report_emails)
+        return send_simple_report_email(report_text, yesterday_et.strftime('%Y-%m-%d'), report_emails)
         
     except Exception as e:
         logger.error(f"Error generating daily report: {e}")
         return False
 
 def send_simple_report_email(report_text, report_date, recipients):
-    """Send simple text email report."""
+    """Send enhanced daily report email with proper ET timezone handling."""
     try:
         # Create MSGraphClient to get access token
         graph_client = MSGraphClient()
@@ -962,13 +1009,19 @@ def send_simple_report_email(report_text, report_date, recipients):
             "Content-Type": "application/json"
         }
         
-        # Rest of the function stays the same...
+        # Enhanced email formatting
         to_recipients = [{"emailAddress": {"address": email}} for email in recipients]
-        subject = f"Daily Email Report - {report_date}"
+        subject = f"Daily Email Processing Report - {report_date} (ET)"
+        
+        # Add HTML formatting for better readability
+        html_body = report_text.replace('\n', '<br>').replace('===', '<b>===').replace('==', '==</b>')
         
         message = {
             "subject": subject,
-            "body": {"contentType": "Text", "content": report_text},
+            "body": {
+                "contentType": "HTML", 
+                "content": f"<html><body style='font-family: monospace; white-space: pre-line;'>{html_body}</body></html>"
+            },
             "toRecipients": to_recipients,
             "importance": "Normal"
         }
@@ -979,10 +1032,10 @@ def send_simple_report_email(report_text, report_date, recipients):
         response = httpx.post(endpoint, headers=headers, json=payload, timeout=30)
         
         if response.status_code in [200, 202]:
-            logger.info(f"Daily report sent to {len(recipients)} recipients")
+            logger.info(f"Daily report sent to {len(recipients)} recipients")            
             return True
         else:
-            logger.error(f"Failed to send report: {response.status_code}")
+            logger.error(f"Failed to send report: {response.status_code} - {response.text}")
             return False
             
     except Exception as e:

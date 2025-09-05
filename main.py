@@ -106,7 +106,7 @@ def start_processor():
         return jsonify({"success": False, "message": str(e)}), 500
 
 @app.route('/stop', methods=['POST'])
-@require_api_key  # SECURITY: Requires API key
+@require_api_key
 def stop_processor():
     """Stop email processor with UNIFIED signal handling"""
     global processor_running
@@ -115,10 +115,14 @@ def stop_processor():
         return jsonify({"success": False, "message": "Not running"}), 400
     
     try:
+        # NEW: Import and call manual shutdown marker
+        from loop import mark_manual_shutdown
+        mark_manual_shutdown()  # Mark as manual before setting stop signal
+        
         stop_event.set()  # Set the unified stop signal
         processor_running = False
         
-        logger.info("Email processor stop requested via API - unified signal sent")
+        logger.info("Email processor stop requested via API - marked as manual shutdown")
         return jsonify({"success": True, "message": "Email processor stop requested"})
     except Exception as e:
         logger.error(f"Failed to stop processor: {e}")

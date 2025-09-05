@@ -20,7 +20,6 @@ The system operates in batch mode, processing emails at regular intervals with c
 email_classification/
 ├── src/
 │   ├── fetch_reply.py        # Email fetching and classification
-│   ├── email_sender.py       # Email sending and draft creation
 │   ├── db.py                 # Database connections (MongoDB and PostgreSQL)
 │   ├── log_config.py         # Logging configuration
 ├── loop.py                   # Batch processing and orchestration
@@ -30,8 +29,8 @@ email_classification/
 ### Component Responsibilities
 
 1. **main.py**: Application entry point with command-line interface
-   - Initializes logging
-   - Parses command-line arguments
+   - Initializes logging.
+   - Parses command-line arguments.
    - Starts the appropriate processing mode
    - Handles graceful shutdown and error reporting
    - 

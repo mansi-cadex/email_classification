@@ -17,6 +17,7 @@ import uuid
 import io
 import httpx
 import msal
+import pytz
 import threading
 import pandas as pd
 import requests 
@@ -739,6 +740,7 @@ ALERT_EMAILS = [
 last_activity_time = datetime.now()
 last_alert_time = None
 alert_count = 0
+manual_shutdown_flag = False  # NEW: Track if shutdown was manual
 
 # ADD THESE FUNCTIONS before run_email_processor() function
 
@@ -823,13 +825,17 @@ Alert sent: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
         return False
 
 def check_and_send_stuck_alert():
-    """Check if system is stuck and send alerts according to schedule."""
-    global last_alert_time, alert_count
+    """Check if system is stuck and send alerts - IGNORES manual shutdowns."""
+    global last_alert_time, alert_count, manual_shutdown_flag
+    
+    # CRITICAL FIX: Don't send alerts if shutdown was manual
+    if manual_shutdown_flag:
+        return  # Exit early - no alerts for manual shutdowns
     
     # Calculate time since last activity
     time_since_activity = (datetime.now() - last_activity_time).total_seconds() / 3600  # hours
     
-    # First alert after 1 hour of inactivity
+    # First alert after 1 hour of inactivity (only if not manual shutdown)
     if time_since_activity >= 1.0 and last_alert_time is None:
         logger.warning(f"System stuck for {time_since_activity:.1f} hours - sending first alert")
         if send_stuck_alert():
@@ -845,7 +851,7 @@ def check_and_send_stuck_alert():
 
 def update_activity_timestamp():
     """Reset activity tracking - call this when system is working normally."""
-    global last_activity_time, last_alert_time, alert_count
+    global last_activity_time, last_alert_time, alert_count, manual_shutdown_flag
     
     # Check if we're recovering from a stuck state
     was_stuck = last_alert_time is not None
@@ -854,9 +860,16 @@ def update_activity_timestamp():
     last_activity_time = datetime.now()
     last_alert_time = None
     alert_count = 0
+    manual_shutdown_flag = False  # Clear manual shutdown flag on activity
     
     if was_stuck:
         logger.info("System activity detected - monitoring reset, alerts cleared")
+
+def mark_manual_shutdown():
+    """Mark that the system is being shut down manually - prevents false stuck alerts."""
+    global manual_shutdown_flag
+    manual_shutdown_flag = True
+    logger.info("Manual shutdown marked - stuck detection disabled")
 
 def run_email_processor(stop_event=None):
     """Main batch processing loop with UNIFIED stop signal, daily reports, and stuck detection alerts."""
@@ -888,6 +901,7 @@ def run_email_processor(stop_event=None):
         # CHECK UNIFIED STOP SIGNAL
         if stop_event.is_set():
             logger.info("STOP: Stop signal detected - shutting down processor NOW")
+            mark_manual_shutdown()  # FIXED: Mark as manual shutdown
             break
             
         start_time = datetime.now()
@@ -912,12 +926,14 @@ def run_email_processor(stop_event=None):
                         continue
                     else:
                         logger.error("Model recovery failed after maximum attempts - shutting down processor")
+                        mark_manual_shutdown()  # ADDED: Mark model failure shutdown as manual
                         break
                 else:
                     logger.info(f"Waiting 60 seconds before retry (failure {consecutive_failures}/{max_failures})")
                     for i in range(60):
                         if stop_event.is_set():
                             logger.info("STOP: Stop signal detected during wait - shutting down NOW")
+                            mark_manual_shutdown()  # ADDED: Mark as manual shutdown
                             return
                         time.sleep(1)
                 continue
@@ -928,20 +944,49 @@ def run_email_processor(stop_event=None):
             # Run main batch processor with stop signal
             run_batch_processor(stop_event)
             
-            # === DAILY REPORT CHECK ===
-            current_date = datetime.now().date()
-            current_hour = datetime.now().hour
-            if current_hour >= 9 and _last_report_date != current_date:
-                logger.info("Sending daily report...")
-                try:
-                    report_success = generate_daily_report()
-                    if report_success:
-                        logger.info("Daily report sent successfully")
-                        _last_report_date = current_date
-                    else:
-                        logger.error("Daily report failed to send")
-                except Exception as e:
-                    logger.error(f"Error sending daily report: {e}")
+            # === DAILY REPORT CHECK - UPDATED FOR 12:00 AM ET ===
+            # Check if it's time to send daily report (12:00 AM ET for previous day)
+            try:
+                et_tz = pytz.timezone('US/Eastern')
+                now_et = datetime.now(et_tz)
+                current_date_et = now_et.date()
+                current_hour_et = now_et.hour
+                current_minute_et = now_et.minute
+                
+                # Send report at 12:00 AM ET (midnight) for the previous day
+                # Check if it's between 12:00 AM and 12:05 AM ET and we haven't sent today's report yet
+                if (current_hour_et == 0 and current_minute_et < 5 and 
+                    _last_report_date != current_date_et):
+                    
+                    logger.info(f"Time for daily report: {now_et.strftime('%Y-%m-%d %I:%M:%S %p %Z')}")
+                    logger.info("Sending daily report for previous day...")
+                    
+                    try:
+                        report_success = generate_daily_report()
+                        if report_success:
+                            logger.info("Daily report sent successfully at 12:00 AM ET")
+                            _last_report_date = current_date_et
+                        else:
+                            logger.error("Daily report failed to send")
+                    except Exception as e:
+                        logger.error(f"Error sending daily report: {e}")
+                        
+            except ImportError:
+                logger.warning("pytz not available - falling back to UTC time for daily reports")
+                # Fallback to original logic if pytz is not available
+                current_date = datetime.now().date()
+                current_hour = datetime.now().hour
+                if current_hour >= 5 and _last_report_date != current_date:  # 5 AM UTC = 12 AM ET
+                    logger.info("Sending daily report (UTC fallback)...")
+                    try:
+                        report_success = generate_daily_report()
+                        if report_success:
+                            logger.info("Daily report sent successfully")
+                            _last_report_date = current_date
+                        else:
+                            logger.error("Daily report failed to send")
+                    except Exception as e:
+                        logger.error(f"Error sending daily report: {e}")
             # ==========================
            
             # Calculate time to next batch
@@ -956,6 +1001,7 @@ def run_email_processor(stop_event=None):
                 
                 if stop_event.is_set():
                     logger.info("STOP: Stop signal detected during batch interval - shutting down NOW")
+                    mark_manual_shutdown()  # ADDED: Mark as manual shutdown
                     return
                 time.sleep(1)
             
@@ -965,6 +1011,7 @@ def run_email_processor(stop_event=None):
             
         except KeyboardInterrupt:
             logger.info("Batch processor interrupted by user")
+            mark_manual_shutdown()  # FIXED: Mark as manual shutdown
             break
         except Exception as e:
             logger.exception(f"Unhandled error in batch processor: {str(e)}")
@@ -976,6 +1023,7 @@ def run_email_processor(stop_event=None):
                 
                 if stop_event.is_set():
                     logger.info("STOP: Stop signal detected during error wait - shutting down NOW")
+                    mark_manual_shutdown()  # ADDED: Mark as manual shutdown
                     return
                 time.sleep(1)
     
