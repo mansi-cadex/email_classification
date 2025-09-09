@@ -55,7 +55,7 @@ EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS")
 
 def check_model_health(max_retries: int = 3, base_timeout: int = 60) -> bool:
     """Robust model health check with retries and backoff."""
-    model_url = "http://34.26.80.201:8000/api/health"
+    model_url = "http://34.10.30.34:8000/api/health"
 
     for attempt in range(max_retries):
         try:
@@ -922,7 +922,7 @@ def run_email_processor(stop_event=None):
     logger.info(f"Force drafts is {'ENABLED' if FORCE_DRAFTS else 'DISABLED'}")
     logger.info(f"SFTP export is {'ENABLED' if SFTP_ENABLED else 'DISABLED'}")
     
-    model_url = "http://34.26.80.201:8000"
+    model_url = "http://34.10.30.34:8000"
     logger.info(f"Model API URL: {model_url}")
     
     consecutive_failures = 0
