@@ -34,7 +34,7 @@ CLIENT_SECRET = os.getenv("CLIENT_SECRET")
 TENANT_ID = os.getenv("TENANT_ID")
 EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS")
 YOUR_DOMAIN = os.getenv("YOUR_DOMAIN", "abc-amega.com")
-MODEL_API_URL = "http://34.10.30.34:8000"
+MODEL_API_URL = "http://104.197.197.76:8000"
 COMPANY_NAME = os.getenv("COMPANY_NAME", "ABC/AMEGA")
 
 # Updated list of allowed labels
