@@ -673,6 +673,35 @@ def process_batch(batch_id: Optional[str] = None, stop_event=None) -> Tuple[bool
     
     return True, total_processed, total_failed, total_draft_count
 
+def check_and_send_daily_report():
+    """Check if it's time to send daily report and send it."""
+    global _last_report_date
+    
+    try:
+        # Get current ET time
+        et_tz = pytz.timezone("US/Eastern")
+        now_et = datetime.now(et_tz)
+        today = now_et.date()
+        
+        # Send report if we haven't sent today's report yet and it's after midnight
+        should_send = (_last_report_date != today and now_et.hour >= 0)
+        
+        if should_send:
+            logger.info(f"Sending daily report for {today} at {now_et.strftime('%I:%M %p %Z')}")
+            
+            try:
+                success = generate_daily_report()
+                if success:
+                    logger.info("Daily report sent successfully")
+                    _last_report_date = today
+                else:
+                    logger.error("Daily report failed to send")
+            except Exception as e:
+                logger.error(f"Error generating daily report: {e}")
+                
+    except Exception as e:
+        logger.error(f"Error checking daily report: {e}")
+
 def run_batch_processor(stop_event=None) -> bool:
     """Run a single batch processing cycle with UNIFIED stop signal."""
     # Create default stop event if not provided
@@ -728,6 +757,9 @@ def run_batch_processor(stop_event=None) -> bool:
         else:
             logger.info(f"Batch {batch_id} has no emails - marking complete, no Excel needed")
             mark_batch_complete(batch_id)
+        
+        # NEW: Check for daily report after successful batch
+        check_and_send_daily_report()
    
     return success
 
@@ -740,9 +772,7 @@ ALERT_EMAILS = [
 last_activity_time = datetime.now()
 last_alert_time = None
 alert_count = 0
-manual_shutdown_flag = False  # NEW: Track if shutdown was manual
-
-# ADD THESE FUNCTIONS before run_email_processor() function
+manual_shutdown_flag = False  
 
 def get_alert_access_token():
     """Get Microsoft Graph API access token for alert emails."""
@@ -871,44 +901,8 @@ def mark_manual_shutdown():
     manual_shutdown_flag = True
     logger.info("Manual shutdown marked - stuck detection disabled")
 
-def daily_report_scheduler(stop_event):
-    """Runs in parallel: pauses batch, sends report at midnight ET, resumes batch."""
-    global _last_report_date
-    et_tz = pytz.timezone("US/Eastern")
-
-    while not stop_event.is_set():
-        now_et = datetime.now(et_tz)
-
-        # At midnight ET, if we haven't sent today's report yet
-        if now_et.hour == 0 and _last_report_date != now_et.date():
-            logger.info("Pausing batch to generate daily report...")
-
-            # Pause batch
-            stop_event.set()
-
-            try:
-                success = generate_daily_report()
-                if success:
-                    logger.info("Daily report sent successfully")
-                    _last_report_date = now_et.date()
-                else:
-                    logger.error("Daily report failed")
-            except Exception as e:
-                logger.error(f"Error generating daily report: {e}")
-
-            # Resume batch
-            stop_event.clear()
-            logger.info("Batch resumed after daily report")
-
-            # Prevent multiple triggers in the same minute
-            time.sleep(60)
-
-        time.sleep(30)  # Check every 30 seconds
-
 def run_email_processor(stop_event=None):
     """Main batch processing loop with UNIFIED stop signal and stuck detection alerts."""
-    global _last_report_date  # Kept for compatibility, but scheduler manages reports now
-    
     # Create default stop event if not provided (for backward compatibility)
     if stop_event is None:
         stop_event = threading.Event()
@@ -1023,9 +1017,6 @@ if __name__ == "__main__":
 
         # Start batch processor in background
         threading.Thread(target=run_email_processor, args=(stop_event,), daemon=True).start()
-
-        # Start daily report scheduler in background
-        threading.Thread(target=daily_report_scheduler, args=(stop_event,), daemon=True).start()
 
         # Keep main thread alive
         while True:
