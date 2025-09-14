@@ -883,7 +883,8 @@ def generate_daily_report():
     # Report recipients - UPDATED with Susan per Yogesh's request
     report_emails = [
         "sanskar.gawande@cadex-solutions.com",
-        "yogesh.patel@cadex-solutions.com"
+        "yogesh.patel@cadex-solutions.com",
+        "susan.orzech@abc-amega.com"
     ]
     
     try:
