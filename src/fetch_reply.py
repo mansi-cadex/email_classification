@@ -874,126 +874,135 @@ def retry_failed_batch(batch_id, batch_size=30):
 def generate_daily_report():
     """
     Generate daily report at 12:00 AM ET for the previous day.
-    Updated per Yogesh's requirements for ET timezone and Susan as recipient.
+    Enhanced with SEPARATE breakdown per mailbox (not merged).
     """
     from datetime import datetime, timedelta
     import pytz
     import httpx
-    
-    # Report recipients - UPDATED with Susan per Yogesh's request
+
+    # Report recipients
     report_emails = [
         "sanskar.gawande@cadex-solutions.com",
         "yogesh.patel@cadex-solutions.com",
         "susan.orzech@abc-amega.com"
     ]
-    
+
     try:
-        # Get Eastern Time zone
-        et_tz = pytz.timezone('US/Eastern')
-        
-        # Get current time in Eastern Time
+        # Timezone setup
+        et_tz = pytz.timezone("US/Eastern")
         now_et = datetime.now(et_tz)
-        
-        # Calculate previous day in ET (report covers the day that just ended)
         yesterday_et = now_et - timedelta(days=1)
-        
-        # Convert to UTC for MongoDB query (MongoDB stores in UTC)
+
         start_date_et = yesterday_et.replace(hour=0, minute=0, second=0, microsecond=0)
         end_date_et = start_date_et + timedelta(days=1)
-        
-        # Convert ET times to UTC for database query
+
         start_date_utc = start_date_et.astimezone(pytz.UTC).replace(tzinfo=None)
         end_date_utc = end_date_et.astimezone(pytz.UTC).replace(tzinfo=None)
-        
+
         logger.info(f"Generating daily report for: {yesterday_et.strftime('%Y-%m-%d')} ET")
         logger.info(f"UTC query range: {start_date_utc} to {end_date_utc}")
-        
+
         # Get MongoDB connection
         mongo = get_mongo()
         if not mongo:
             logger.error("No MongoDB connection for report")
             return False
-        
-        # Query emails processed yesterday (in ET timezone)
+
+        # Query emails processed yesterday
         query = {
             "processed_at": {
                 "$gte": start_date_utc.isoformat(),
                 "$lt": end_date_utc.isoformat()
             }
         }
-        
+
         emails = list(mongo.collection.find(query))
-        
-        # Enhanced counting and analysis
         total_emails = len(emails)
-        replies_generated = 0
-        drafts_created = 0
-        label_counts = {}
-        account_counts = {}
-        
-        # Count everything with more detail
+
+        if total_emails == 0:
+            logger.warning("No emails found for reporting period")
+            return send_simple_report_email(
+                "No emails were processed during this period.",
+                yesterday_et.strftime("%Y-%m-%d"),
+                report_emails
+            )
+
+        # Separate emails by source account
+        emails_by_account = {}
         for email in emails:
-            # Count replies
-            if email.get("response", ""):
-                replies_generated += 1
-            
-            # Count drafts created
-            if email.get("draft_created", False):
-                drafts_created += 1
-            
-            # Count by label
-            label = email.get("event_type", "unknown")
-            label_counts[label] = label_counts.get(label, 0) + 1
-            
-            # Count by source account
             account = email.get("source_account", "unknown")
-            account_counts[account] = account_counts.get(account, 0) + 1
-        
-        # Create enhanced text report with ET timezone
+            if account not in emails_by_account:
+                emails_by_account[account] = []
+            emails_by_account[account].append(email)
+
+        # Start building report
         report_text = f"""Daily Email Processing Report - {yesterday_et.strftime('%Y-%m-%d')} (Eastern Time)
 
-=== SUMMARY ===
+=== OVERALL SUMMARY ===
 Total Emails Processed: {total_emails}
-Replies Generated: {replies_generated}
-Drafts Created: {drafts_created}
+Total Mailboxes: {len(emails_by_account)}
 
-=== PROCESSING BY CLASSIFICATION ===
 """
-        
-        # Add label counts (sorted by count, descending)
-        for label, count in sorted(label_counts.items(), key=lambda x: x[1], reverse=True):
-            percentage = (count / total_emails * 100) if total_emails > 0 else 0
-            report_text += f"- {label.replace('_', ' ').title()}: {count} emails ({percentage:.1f}%)\n"
-        
-        report_text += f"""
-=== PROCESSING BY EMAIL ACCOUNT ===
+
+        # Process each mailbox separately
+        for account, account_emails in sorted(emails_by_account.items()):
+            account_total = len(account_emails)
+            
+            # Count classifications for THIS mailbox only
+            label_counts = {}
+            replies_generated = 0
+            drafts_created = 0
+            
+            for email in account_emails:
+                # Count replies
+                if email.get("response", ""):
+                    replies_generated += 1
+                
+                # Count drafts
+                if email.get("draft_created", False):
+                    drafts_created += 1
+                
+                # Count by classification
+                label = email.get("event_type", "unknown")
+                label_counts[label] = label_counts.get(label, 0) + 1
+            
+            # Calculate rates
+            response_rate = (replies_generated / account_total * 100) if account_total > 0 else 0
+            draft_rate = (drafts_created / account_total * 100) if account_total > 0 else 0
+            
+            # Add this mailbox's section to report
+            report_text += f"""
+{'=' * 70}
+MAILBOX: {account}
+{'=' * 70}
+
+Total Emails: {account_total}
+Replies Generated: {replies_generated} ({response_rate:.1f}%)
+Drafts Created: {drafts_created} ({draft_rate:.1f}%)
+
+CLASSIFICATION BREAKDOWN:
 """
-        
-        # Add account counts
-        for account, count in sorted(account_counts.items(), key=lambda x: x[1], reverse=True):
-            percentage = (count / total_emails * 100) if total_emails > 0 else 0
-            report_text += f"- {account}: {count} emails ({percentage:.1f}%)\n"
-        
-        # Add response rate analysis
-        response_rate = (replies_generated / total_emails * 100) if total_emails > 0 else 0
-        draft_rate = (drafts_created / total_emails * 100) if total_emails > 0 else 0
-        
+            
+            # Add classification counts for this mailbox
+            for label, count in sorted(label_counts.items(), key=lambda x: x[1], reverse=True):
+                percentage = (count / account_total * 100) if account_total > 0 else 0
+                label_display = label.replace('_', ' ').title()
+                report_text += f"  - {label_display}: {count} emails ({percentage:.1f}%)\n"
+
+        # Add footer
         report_text += f"""
-=== RESPONSE ANALYSIS ===
-Response Rate: {response_rate:.1f}% ({replies_generated}/{total_emails})
-Draft Creation Rate: {draft_rate:.1f}% ({drafts_created}/{total_emails})
 
 === REPORT INFO ===
 Report Date: {yesterday_et.strftime('%Y-%m-%d')} (Eastern Time)
 Report Generated: {now_et.strftime('%Y-%m-%d %I:%M:%S %p %Z')}
 Coverage: 12:00 AM - 11:59 PM ET
 """
-        
-        logger.info(f"Report ready: {total_emails} emails, {replies_generated} replies, {drafts_created} drafts")
-        
+
+        logger.info(f"Report ready: {total_emails} emails across {len(emails_by_account)} mailboxes")
+
         # Send email using Graph API
         return send_simple_report_email(report_text, yesterday_et.strftime('%Y-%m-%d'), report_emails)
-        
+
     except Exception as e:
         logger.error(f"Error generating daily report: {e}")
         return False
