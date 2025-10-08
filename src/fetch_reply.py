@@ -874,7 +874,7 @@ def retry_failed_batch(batch_id, batch_size=30):
 def generate_daily_report():
     """
     Generate daily report at 12:00 AM ET for the previous day.
-    Enhanced with SEPARATE breakdown per mailbox (not merged).
+    Shows ALL configured mailboxes (even if zero emails).
     """
     from datetime import datetime, timedelta
     import pytz
@@ -919,34 +919,62 @@ def generate_daily_report():
         emails = list(mongo.collection.find(query))
         total_emails = len(emails)
 
-        if total_emails == 0:
-            logger.warning("No emails found for reporting period")
-            return send_simple_report_email(
-                "No emails were processed during this period.",
-                yesterday_et.strftime("%Y-%m-%d"),
-                report_emails
-            )
+        # Get ALL configured mailboxes (even if no emails)
+        configured_mailboxes = EMAIL_ADDRESS.split(",")
+        configured_mailboxes = [email.strip() for email in configured_mailboxes]
+        
+        logger.info(f"Configured mailboxes: {len(configured_mailboxes)}")
+        for mailbox in configured_mailboxes:
+            logger.info(f"  - {mailbox}")
 
         # Separate emails by source account
         emails_by_account = {}
+        
+        # Initialize ALL configured mailboxes with empty lists
+        for mailbox in configured_mailboxes:
+            emails_by_account[mailbox] = []
+        
+        # Add emails to their respective mailboxes
         for email in emails:
             account = email.get("source_account", "unknown")
-            if account not in emails_by_account:
-                emails_by_account[account] = []
-            emails_by_account[account].append(email)
+            if account in emails_by_account:
+                emails_by_account[account].append(email)
+            else:
+                # Handle emails from unconfigured mailboxes (legacy data)
+                if account not in emails_by_account:
+                    emails_by_account[account] = []
+                emails_by_account[account].append(email)
 
         # Start building report
         report_text = f"""Daily Email Processing Report - {yesterday_et.strftime('%Y-%m-%d')} (Eastern Time)
 
 === OVERALL SUMMARY ===
 Total Emails Processed: {total_emails}
-Total Mailboxes: {len(emails_by_account)}
+Configured Mailboxes: {len(configured_mailboxes)}
 
 """
 
-        # Process each mailbox separately
-        for account, account_emails in sorted(emails_by_account.items()):
+        # Process each mailbox (including empty ones)
+        for account in sorted(emails_by_account.keys()):
+            account_emails = emails_by_account[account]
             account_total = len(account_emails)
+            
+            # Add this mailbox's section to report
+            report_text += f"""
+{'=' * 70}
+MAILBOX: {account}
+{'=' * 70}
+
+Total Emails: {account_total}
+"""
+            
+            if account_total == 0:
+                # No emails for this mailbox
+                report_text += """
+Status: No emails processed for this mailbox during this period.
+
+"""
+                continue
             
             # Count classifications for THIS mailbox only
             label_counts = {}
@@ -970,14 +998,8 @@ Total Mailboxes: {len(emails_by_account)}
             response_rate = (replies_generated / account_total * 100) if account_total > 0 else 0
             draft_rate = (drafts_created / account_total * 100) if account_total > 0 else 0
             
-            # Add this mailbox's section to report
-            report_text += f"""
-{'=' * 70}
-MAILBOX: {account}
-{'=' * 70}
-
-Total Emails: {account_total}
-Replies Generated: {replies_generated} ({response_rate:.1f}%)
+            # Add stats for this mailbox
+            report_text += f"""Replies Generated: {replies_generated} ({response_rate:.1f}%)
 Drafts Created: {drafts_created} ({draft_rate:.1f}%)
 
 CLASSIFICATION BREAKDOWN:
