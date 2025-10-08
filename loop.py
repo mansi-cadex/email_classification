@@ -51,7 +51,7 @@ SFTP_ENABLED = os.getenv("SFTP_ENABLED", "False").lower() in ["true", "yes", "1"
 CLIENT_ID = os.getenv("CLIENT_ID")
 CLIENT_SECRET = os.getenv("CLIENT_SECRET")
 TENANT_ID = os.getenv("TENANT_ID")
-EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS")
+EMAIL_ADDRESS = "ABCcollectionsteamD@abc-amega.com,ABCcollectionsteamI@abc-amega.com"
 
 def check_model_health(max_retries: int = 3, base_timeout: int = 60) -> bool:
     """Robust model health check with retries and backoff."""

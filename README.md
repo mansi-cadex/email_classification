@@ -41,19 +41,13 @@ email_classification/
    - Moves emails to appropriate folders based on classification
    - Stores email data in MongoDB
 
-3. **src/email_sender.py**: Email sending and draft creation
-   - Creates draft emails in Outlook
-   - Sends email replies when appropriate
-   - Updates email status in the database
-   - Handles Microsoft Graph API for email creation/sending
-
-4. **src/db.py**: Database operations
+3. **src/db.py**: Database operations
    - Provides interfaces for MongoDB operations
    - Provides interfaces for PostgreSQL operations
    - Handles data synchronization between databases
    - Manages batch tracking and status updates
 
-5. **loop.py**: Batch processing and orchestration
+4. **loop.py**: Batch processing and orchestration
    - Manages batch lifecycle (create, process, finalize)
    - Retries failed batches with exponential backoff
    - Exports data to Excel reports
