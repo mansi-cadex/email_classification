@@ -24,7 +24,6 @@ from typing import Dict, Optional, List, Any, Tuple
 from dotenv import load_dotenv
 from src.db import get_mongo, PostgresHelper
 from src.log_config import logger
-from src.invoice_handler import InvoiceHandler
 
 load_dotenv()
 
@@ -711,8 +710,6 @@ class EmailProcessor:
         reply_text = ""
         draft_created = False
         draft_id = None
-        attachment_files = []
-        invoice_handler = None
         invoices_attached = False
         invoice_count = 0
         
@@ -721,32 +718,6 @@ class EmailProcessor:
             if self.stop_event.is_set():
                 logger.info("STOP: Stop signal detected before reply generation - stopping NOW")
                 return False
-            
-            # For invoice requests, get invoice files FIRST
-            if event_type in ["invoice_request_no_info", "invoice_request_with_info"]:
-                if company_name and debtor_number:
-                    logger.info(f"Invoice request: {company_name} / {debtor_number}")
-                    
-                    invoice_handler = InvoiceHandler()
-                    success, all_files, error = invoice_handler.retrieve_invoices(company_name, debtor_number)
-                    
-                    if success and all_files:
-                        # Check if specific invoice requested
-                        if invoice_number:
-                            specific_file = invoice_handler.find_specific_invoice(all_files, invoice_number)
-                            if specific_file:
-                                attachment_files = [specific_file]
-                                logger.info(f"Found specific invoice: {os.path.basename(specific_file)}")
-                            else:
-                                attachment_files = all_files
-                                logger.info(f"Specific invoice not found, attaching all {len(all_files)} files")
-                        else:
-                            attachment_files = all_files
-                            logger.info(f"Attaching all {len(all_files)} invoice files")
-                    else:
-                        logger.warning(f"Invoice retrieval failed: {error}")
-                else:
-                    logger.warning(f"Missing invoice data - company: {company_name}, abcfn: {debtor_number}")
             
             # Map invoice_request_with_info to use invoice_request_no_info reply template
             reply_label = "invoice_request_no_info" if event_type == "invoice_request_with_info" else event_type
@@ -762,8 +733,6 @@ class EmailProcessor:
             # CHECK UNIFIED STOP AFTER REPLY GENERATION
             if self.stop_event.is_set():
                 logger.info("STOP: Stop signal detected after reply generation - stopping NOW")
-                if invoice_handler and attachment_files:
-                    invoice_handler.cleanup_temp_files(attachment_files)
                 return False
                 
             if reply_text:
@@ -777,22 +746,8 @@ class EmailProcessor:
                 if draft_id:
                     logger.info(f"Threaded draft saved: {draft_id}")
                     draft_created = True
-                    
-                    # Attach invoice files if we have them
-                    if attachment_files:
-                        attached_count = self.graph_client.attach_files_to_draft(
-                            draft_id, source_account, attachment_files
-                        )
-                        logger.info(f"Attached {attached_count} invoice files to draft")
-                        invoices_attached = attached_count > 0
-                        invoice_count = attached_count
                 else:
                     logger.warning(f"Threaded draft save failed")
-                
-                # Cleanup temp files after attaching
-                if invoice_handler and attachment_files:
-                    invoice_handler.cleanup_temp_files(attachment_files)
-                    logger.info("Cleaned up temp invoice files")
         
         # CHECK UNIFIED STOP BEFORE MONGODB STORAGE
         if self.stop_event.is_set():
