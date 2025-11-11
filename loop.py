@@ -865,15 +865,15 @@ def check_and_send_stuck_alert():
     # Calculate time since last activity
     time_since_activity = (datetime.now() - last_activity_time).total_seconds() / 3600  # hours
     
-    # First alert after 1 hour of inactivity (only if not manual shutdown)
-    if time_since_activity >= 1.0 and last_alert_time is None:
+    # First alert after 3.5 hours of inactivity (only if not manual shutdown)
+    if time_since_activity >= 3.5 and last_alert_time is None:
         logger.warning(f"System stuck for {time_since_activity:.1f} hours - sending first alert")
         if send_stuck_alert():
             last_alert_time = datetime.now()
             alert_count = 1
     
     # Follow-up alerts every 2 hours after first alert
-    elif last_alert_time and time_since_activity >= (1.0 + alert_count * 2.0):
+    elif last_alert_time and time_since_activity >= (3.5 + alert_count * 2.0):
         logger.warning(f"System stuck for {time_since_activity:.1f} hours - sending follow-up alert #{alert_count + 1}")
         if send_stuck_alert():
             last_alert_time = datetime.now()

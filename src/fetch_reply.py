@@ -54,7 +54,7 @@ ALLOWED_LABELS = [
 RESPONSE_LABELS = [
     "invoice_request_no_info",
     "invoice_request_with_info",  
-    "claims_paid_no_info"
+    "claims_paid_no_proof"
 ]
 
 def validate_config():
@@ -958,6 +958,17 @@ def generate_daily_report():
     import pytz
     import httpx
 
+    # ADD TIME CHECK FIRST - Only run between 12:00 AM and 12:59 AM EST
+    et_tz = pytz.timezone("US/Eastern")
+    now_et = datetime.now(et_tz)
+    
+    # Only run between 12:00 AM and 12:59 AM EST
+    if now_et.hour != 0:
+        logger.info(f"Report generation skipped - current time: {now_et.strftime('%I:%M %p %Z')} (only runs at 12 AM EST)")
+        return False
+    
+    logger.info(f"Report generation starting at: {now_et.strftime('%I:%M %p %Z')}")
+
     # Report recipients
     report_emails = [
         "sanskar.gawande@cadex-solutions.com",
@@ -969,9 +980,7 @@ def generate_daily_report():
     MISCLASSIFICATION_MAILBOX = "ABCCollectionsTeamDTest@abc-amega.com"
 
     try:
-        # Timezone setup
-        et_tz = pytz.timezone("US/Eastern")
-        now_et = datetime.now(et_tz)
+        # Timezone setup (now_et already defined above)
         yesterday_et = now_et - timedelta(days=1)
 
         start_date_et = yesterday_et.replace(hour=0, minute=0, second=0, microsecond=0)
