@@ -24,6 +24,7 @@ from typing import Dict, Optional, List, Any, Tuple
 from dotenv import load_dotenv
 from src.db import get_mongo, PostgresHelper
 from src.log_config import logger
+from src.invoice_handler import InvoiceHandler
 
 load_dotenv()
 
@@ -44,6 +45,7 @@ ALLOWED_LABELS = [
     "auto_reply_no_info",
     "auto_reply_with_info",
     "invoice_request_no_info",
+    "invoice_request_with_info",  
     "claims_paid_no_proof",
     "claims_paid_with_proof",
     "manual_review",
@@ -52,7 +54,8 @@ ALLOWED_LABELS = [
 # Labels that should receive responses
 RESPONSE_LABELS = [
     "invoice_request_no_info",
-    "claims_paid_no_proof"
+    "invoice_request_with_info",  
+    "claims_paid_no_info"
 ]
 
 def validate_config():
@@ -472,6 +475,64 @@ class MSGraphClient:
         
         return None
 
+    def attach_files_to_draft(self, draft_id: str, from_account: str, file_paths: List[str]) -> int:
+        """
+        Attach files to an existing draft email
+        
+        Args:
+            draft_id: Draft message ID
+            from_account: Email account
+            file_paths: List of file paths to attach
+            
+        Returns:
+            Number of successfully attached files
+        """
+        import base64
+        
+        access_token = self.get_access_token()
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json"
+        }
+        
+        success_count = 0
+        
+        for file_path in file_paths:
+            try:
+                # Read file and encode to base64
+                with open(file_path, 'rb') as f:
+                    file_content = f.read()
+                
+                file_base64 = base64.b64encode(file_content).decode('utf-8')
+                filename = os.path.basename(file_path)
+                
+                # Check file size (Microsoft Graph limit is 3MB for inline attachments)
+                file_size = len(file_content)
+                if file_size > 3 * 1024 * 1024:  # 3MB
+                    logger.warning(f"File too large to attach: {filename} ({file_size} bytes)")
+                    continue
+                
+                # Create attachment
+                attachment_payload = {
+                    "@odata.type": "#microsoft.graph.fileAttachment",
+                    "name": filename,
+                    "contentBytes": file_base64
+                }
+                
+                endpoint = f"{self.base_url}/users/{from_account}/messages/{draft_id}/attachments"
+                response = httpx.post(endpoint, headers=headers, json=attachment_payload, timeout=60)
+                
+                if response.status_code in [200, 201]:
+                    logger.info(f"Attached file: {filename}")
+                    success_count += 1
+                else:
+                    logger.error(f"Failed to attach {filename}: {response.status_code}")
+                    
+            except Exception as e:
+                logger.error(f"Error attaching file {file_path}: {e}")
+        
+        return success_count
+
     def ensure_classification_folders(self, email_address):
         """Ensure classification folders exist."""
         def _normalize_folder_name(name):
@@ -572,6 +633,9 @@ class EmailProcessor:
         has_attachments = msg.get("hasAttachments", False)
         conversation_id = msg.get("conversationId", "")
         
+        # ✅ Extract headers for model API
+        headers = msg.get("internetMessageHeaders", [])
+        
         # Extract clean content
         clean_body, data_source, had_threads = extract_clean_email_content(msg)
         
@@ -607,10 +671,11 @@ class EmailProcessor:
             logger.info("STOP: Stop signal detected before model API call - stopping NOW")
             return False
         
-        # Call model API
+        # ✅ Call model API with headers
         model_response = self.model_api.process_email_complete(
             subject=subject,
             body=clean_body,
+            headers=headers,
             sender_email=sender,
             recipient_emails=recipient_emails,
             has_attachments=has_attachments,
@@ -624,6 +689,8 @@ class EmailProcessor:
         
         # Get model fields
         debtor_number = model_response.get("debtor_number", "")
+        company_name = model_response.get("company_name", "")
+        invoice_number = model_response.get("invoice_number", "")
         debtor_id = None  # Always null
         event_type = model_response.get("event_type", "uncategorised") 
         target_folder = model_response.get("target_folder", "uncategorised")
@@ -644,36 +711,88 @@ class EmailProcessor:
         reply_text = ""
         draft_created = False
         draft_id = None
+        attachment_files = []
+        invoice_handler = None
+        invoices_attached = False
+        invoice_count = 0
         
         if event_type in RESPONSE_LABELS:
             # CHECK UNIFIED STOP BEFORE REPLY GENERATION
             if self.stop_event.is_set():
                 logger.info("STOP: Stop signal detected before reply generation - stopping NOW")
                 return False
-                
+            
+            # For invoice requests, get invoice files FIRST
+            if event_type in ["invoice_request_no_info", "invoice_request_with_info"]:
+                if company_name and debtor_number:
+                    logger.info(f"Invoice request: {company_name} / {debtor_number}")
+                    
+                    invoice_handler = InvoiceHandler()
+                    success, all_files, error = invoice_handler.retrieve_invoices(company_name, debtor_number)
+                    
+                    if success and all_files:
+                        # Check if specific invoice requested
+                        if invoice_number:
+                            specific_file = invoice_handler.find_specific_invoice(all_files, invoice_number)
+                            if specific_file:
+                                attachment_files = [specific_file]
+                                logger.info(f"Found specific invoice: {os.path.basename(specific_file)}")
+                            else:
+                                attachment_files = all_files
+                                logger.info(f"Specific invoice not found, attaching all {len(all_files)} files")
+                        else:
+                            attachment_files = all_files
+                            logger.info(f"Attaching all {len(all_files)} invoice files")
+                    else:
+                        logger.warning(f"Invoice retrieval failed: {error}")
+                else:
+                    logger.warning(f"Missing invoice data - company: {company_name}, abcfn: {debtor_number}")
+            
+            # Map invoice_request_with_info to use invoice_request_no_info reply template
+            reply_label = "invoice_request_no_info" if event_type == "invoice_request_with_info" else event_type
+            
+            # Generate reply text from model
             reply_text = self.model_api.generate_reply(
                 subject=subject,
                 body=clean_body, 
-                label=event_type,
+                label=reply_label,  # Both invoice labels use same template
                 sender_name=sender_name
             )
             
             # CHECK UNIFIED STOP AFTER REPLY GENERATION
             if self.stop_event.is_set():
                 logger.info("STOP: Stop signal detected after reply generation - stopping NOW")
+                if invoice_handler and attachment_files:
+                    invoice_handler.cleanup_temp_files(attachment_files)
                 return False
                 
             if reply_text:
                 logger.info(f"Reply generated: {len(reply_text)} chars")
-                # Create threaded reply draft using original message ID
+                
+                # Create draft with reply text
                 draft_id = self.graph_client.create_threaded_reply_draft(
                     message_id, reply_text, source_account
                 )
+                
                 if draft_id:
                     logger.info(f"Threaded draft saved: {draft_id}")
                     draft_created = True
+                    
+                    # Attach invoice files if we have them
+                    if attachment_files:
+                        attached_count = self.graph_client.attach_files_to_draft(
+                            draft_id, source_account, attachment_files
+                        )
+                        logger.info(f"Attached {attached_count} invoice files to draft")
+                        invoices_attached = attached_count > 0
+                        invoice_count = attached_count
                 else:
                     logger.warning(f"Threaded draft save failed")
+                
+                # Cleanup temp files after attaching
+                if invoice_handler and attachment_files:
+                    invoice_handler.cleanup_temp_files(attachment_files)
+                    logger.info("Cleaned up temp invoice files")
         
         # CHECK UNIFIED STOP BEFORE MONGODB STORAGE
         if self.stop_event.is_set():
@@ -698,6 +817,8 @@ class EmailProcessor:
             
             # Model API fields
             "debtor_number": debtor_number,
+            "company_name": company_name,
+            "invoice_number": invoice_number,
             "event_type": event_type,
             "target_folder": target_folder,
             "reply_sent": reply_sent,
@@ -714,6 +835,8 @@ class EmailProcessor:
             "response_sent": False if reply_text else None,
             "draft_created": draft_created,
             "draft_id": draft_id,
+            "invoices_attached": invoices_attached,
+            "invoice_count": invoice_count,
             "batch_id": self.batch_id,
             "data_source": data_source,
             "had_threads": had_threads,
@@ -734,7 +857,7 @@ class EmailProcessor:
         
         # Move to folder and track message ID properly
         folder_mapping = self.folder_mappings.get(source_account, {})
-        folder_id = folder_mapping.get(event_type)
+        folder_id = folder_mapping.get(event_type)  # Uses event_type (not target_folder)
         msg_id_for_read = message_id  # Start with original ID
         
         if folder_id:
@@ -874,7 +997,7 @@ def retry_failed_batch(batch_id, batch_size=30):
 def generate_daily_report():
     """
     Generate daily report at 12:00 AM ET for the previous day.
-    Shows ALL configured mailboxes (even if zero emails).
+    Shows ALL configured mailboxes + misclassification count from 'AI Agent Issues' folder.
     """
     from datetime import datetime, timedelta
     import pytz
@@ -886,6 +1009,9 @@ def generate_daily_report():
         "yogesh.patel@cadex-solutions.com",
         "susan.orzech@abc-amega.com"
     ]
+
+    # Misclassification email configuration - Updated to use correct mailbox
+    MISCLASSIFICATION_MAILBOX = "ABCCollectionsTeamDTest@abc-amega.com"
 
     try:
         # Timezone setup
@@ -927,6 +1053,14 @@ def generate_daily_report():
         for mailbox in configured_mailboxes:
             logger.info(f"  - {mailbox}")
 
+        # FETCH MISCLASSIFICATION COUNT - From 'AI Agent Issues' folder
+        logger.info("Fetching misclassification count from 'AI Agent Issues' folder...")
+        misclassification_count = fetch_misclassification_count(
+            MISCLASSIFICATION_MAILBOX,
+            start_date_utc,
+            end_date_utc
+        )
+
         # Separate emails by source account
         emails_by_account = {}
         
@@ -945,92 +1079,271 @@ def generate_daily_report():
                     emails_by_account[account] = []
                 emails_by_account[account].append(email)
 
-        # Start building report
-        report_text = f"""Daily Email Processing Report - {yesterday_et.strftime('%Y-%m-%d')} (Eastern Time)
+        # Start building HTML TABLE report
+        report_html = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body {{ font-family: Arial, sans-serif; margin: 20px; }}
+        table {{ border-collapse: collapse; width: 100%; margin: 20px 0; }}
+        th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
+        th {{ background-color: #f2f2f2; font-weight: bold; }}
+        .total-row {{ background-color: #f9f9f9; font-weight: bold; }}
+        .center {{ text-align: center; }}
+        .number {{ text-align: right; }}
+        h1, h2 {{ color: #333; }}
+        .summary-box {{ 
+            background-color: #f8f9fa; 
+            border: 1px solid #dee2e6; 
+            padding: 15px; 
+            margin: 15px 0; 
+            border-radius: 5px; 
+        }}
+    </style>
+</head>
+<body>
 
-=== OVERALL SUMMARY ===
-Total Emails Processed: {total_emails}
-Configured Mailboxes: {len(configured_mailboxes)}
+<h1>Daily Email Processing Report - {yesterday_et.strftime('%Y-%m-%d')} (Eastern Time)</h1>
 
+<div class="summary-box">
+    <h2>📊 OVERALL SUMMARY</h2>
+    <table>
+        <tr><th>Metric</th><th class="number">Value</th></tr>
+        <tr><td>Total Emails Processed</td><td class="number">{total_emails}</td></tr>
+        <tr><td>Configured Mailboxes</td><td class="number">{len(configured_mailboxes)}</td></tr>
+        <tr><td>Misclassification Reports</td><td class="number">{misclassification_count}</td></tr>
+        <tr><td>Report Coverage</td><td class="center">12:00 AM - 11:59 PM ET</td></tr>
+    </table>
+</div>
+
+<h2>📧 EMAIL PROCESSING BY MAILBOX</h2>
+<table>
+    <thead>
+        <tr>
+            <th>Mailbox</th>
+            <th class="center">Total Emails</th>
+            <th class="center">Replies Generated</th>
+            <th class="center">Drafts Created</th>
+            <th class="center">Response Rate</th>
+            <th class="center">Draft Rate</th>
+        </tr>
+    </thead>
+    <tbody>
 """
 
-        # Process each mailbox (including empty ones)
+        # Process each mailbox for summary table
+        total_all_emails = 0
+        total_all_replies = 0
+        total_all_drafts = 0
+
         for account in sorted(emails_by_account.keys()):
             account_emails = emails_by_account[account]
             account_total = len(account_emails)
             
-            # Add this mailbox's section to report
-            report_text += f"""
-{'=' * 70}
-MAILBOX: {account}
-{'=' * 70}
-
-Total Emails: {account_total}
-"""
-            
-            if account_total == 0:
-                # No emails for this mailbox
-                report_text += """
-Status: No emails processed for this mailbox during this period.
-
-"""
-                continue
-            
-            # Count classifications for THIS mailbox only
-            label_counts = {}
+            # Count statistics for this mailbox
             replies_generated = 0
             drafts_created = 0
             
             for email in account_emails:
-                # Count replies
                 if email.get("response", ""):
                     replies_generated += 1
-                
-                # Count drafts
                 if email.get("draft_created", False):
                     drafts_created += 1
-                
-                # Count by classification
-                label = email.get("event_type", "unknown")
-                label_counts[label] = label_counts.get(label, 0) + 1
             
             # Calculate rates
             response_rate = (replies_generated / account_total * 100) if account_total > 0 else 0
             draft_rate = (drafts_created / account_total * 100) if account_total > 0 else 0
             
-            # Add stats for this mailbox
-            report_text += f"""Replies Generated: {replies_generated} ({response_rate:.1f}%)
-Drafts Created: {drafts_created} ({draft_rate:.1f}%)
-
-CLASSIFICATION BREAKDOWN:
-"""
+            # Add to totals
+            total_all_emails += account_total
+            total_all_replies += replies_generated
+            total_all_drafts += drafts_created
             
-            # Add classification counts for this mailbox
+            # Add row to table
+            report_html += f"""
+        <tr>
+            <td>{account}</td>
+            <td class="number">{account_total}</td>
+            <td class="number">{replies_generated}</td>
+            <td class="number">{drafts_created}</td>
+            <td class="number">{response_rate:.1f}%</td>
+            <td class="number">{draft_rate:.1f}%</td>
+        </tr>"""
+
+        # Add total row
+        total_response_rate = (total_all_replies / total_all_emails * 100) if total_all_emails > 0 else 0
+        total_draft_rate = (total_all_drafts / total_all_emails * 100) if total_all_emails > 0 else 0
+
+        report_html += f"""
+        <tr class="total-row">
+            <td><strong>TOTAL</strong></td>
+            <td class="number"><strong>{total_all_emails}</strong></td>
+            <td class="number"><strong>{total_all_replies}</strong></td>
+            <td class="number"><strong>{total_all_drafts}</strong></td>
+            <td class="number"><strong>{total_response_rate:.1f}%</strong></td>
+            <td class="number"><strong>{total_draft_rate:.1f}%</strong></td>
+        </tr>
+    </tbody>
+</table>
+"""
+
+        # Add detailed classification breakdown TABLE
+        report_html += """
+<h2>🏷️ DETAILED CLASSIFICATION BREAKDOWN</h2>
+<table>
+    <thead>
+        <tr>
+            <th>Mailbox</th>
+            <th>Classification</th>
+            <th class="center">Count</th>
+            <th class="center">Percentage</th>
+        </tr>
+    </thead>
+    <tbody>
+"""
+
+        # Process detailed classification for each mailbox
+        for account in sorted(emails_by_account.keys()):
+            account_emails = emails_by_account[account]
+            account_total = len(account_emails)
+            
+            if account_total == 0:
+                report_html += f"""
+        <tr>
+            <td>{account}</td>
+            <td colspan="3" class="center"><em>No emails processed</em></td>
+        </tr>"""
+                continue
+            
+            # Count classifications for this mailbox
+            label_counts = {}
+            for email in account_emails:
+                label = email.get("event_type", "unknown")
+                label_counts[label] = label_counts.get(label, 0) + 1
+            
+            # Add classification rows
+            first_row = True
             for label, count in sorted(label_counts.items(), key=lambda x: x[1], reverse=True):
                 percentage = (count / account_total * 100) if account_total > 0 else 0
                 label_display = label.replace('_', ' ').title()
-                report_text += f"  - {label_display}: {count} emails ({percentage:.1f}%)\n"
+                
+                mailbox_cell = account if first_row else ""
+                first_row = False
+                
+                report_html += f"""
+        <tr>
+            <td>{mailbox_cell}</td>
+            <td>{label_display}</td>
+            <td class="number">{count}</td>
+            <td class="number">{percentage:.1f}%</td>
+        </tr>"""
 
-        # Add footer
-        report_text += f"""
-
-=== REPORT INFO ===
-Report Date: {yesterday_et.strftime('%Y-%m-%d')} (Eastern Time)
-Report Generated: {now_et.strftime('%Y-%m-%d %I:%M:%S %p %Z')}
-Coverage: 12:00 AM - 11:59 PM ET
+        report_html += """
+    </tbody>
+</table>
 """
 
-        logger.info(f"Report ready: {total_emails} emails across {len(emails_by_account)} mailboxes")
+        # Add footer
+        report_html += f"""
+<div class="summary-box">
+    <h2>📋 REPORT INFORMATION</h2>
+    <table>
+        <tr><th>Report Date</th><td>{yesterday_et.strftime('%Y-%m-%d')} (Eastern Time)</td></tr>
+        <tr><th>Report Generated</th><td>{now_et.strftime('%Y-%m-%d %I:%M:%S %p %Z')}</td></tr>
+        <tr><th>Coverage Period</th><td>12:00 AM - 11:59 PM ET</td></tr>
+        <tr><th>Total Processing Mailboxes</th><td>{len(configured_mailboxes)}</td></tr>
+        <tr><th>Misclassification Monitoring</th><td>{MISCLASSIFICATION_MAILBOX} (AI Agent Issues folder)</td></tr>
+    </table>
+</div>
 
-        # Send email using Graph API
-        return send_simple_report_email(report_text, yesterday_et.strftime('%Y-%m-%d'), report_emails)
+</body>
+</html>
+"""
+
+        logger.info(f"Report ready: {total_emails} emails processed, {misclassification_count} misclassifications")
+
+        # Send HTML email using Graph API
+        return send_enhanced_report_email(report_html, yesterday_et.strftime('%Y-%m-%d'), report_emails)
 
     except Exception as e:
         logger.error(f"Error generating daily report: {e}")
         return False
 
-def send_simple_report_email(report_text, report_date, recipients):
-    """Send enhanced daily report email with proper ET timezone handling."""
+def fetch_misclassification_count(misclassification_mailbox, start_date_utc, end_date_utc):
+    """
+    Fetch total count of emails in the 'AI Agent Issues' folder during the time period.
+    Accesses ABCCollectionsTeamDTest@abc-amega.com mailbox and finds the specific folder.
+    """
+    try:
+        # Create MSGraphClient to access the misclassification mailbox
+        graph_client = MSGraphClient()
+        access_token = graph_client.get_access_token()
+        
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json"
+        }
+        
+        # Step 1: Find the "AI Agent Issues" folder
+        logger.info(f"Finding 'AI Agent Issues' folder in {misclassification_mailbox}")
+        folders_url = f"{MS_GRAPH_BASE_URL}/users/{misclassification_mailbox}/mailFolders"
+        folders_response = httpx.get(folders_url, headers=headers, timeout=60)
+        
+        if folders_response.status_code != 200:
+            logger.error(f"Failed to fetch folders: {folders_response.status_code}")
+            return 0
+        
+        folders = folders_response.json().get("value", [])
+        ai_agent_folder_id = None
+        
+        # Search for "AI Agent Issues" folder (case-insensitive)
+        for folder in folders:
+            folder_name = folder.get("displayName", "").strip()
+            if folder_name.lower() == "ai agent issues":
+                ai_agent_folder_id = folder.get("id")
+                logger.info(f"Found 'AI Agent Issues' folder with ID: {ai_agent_folder_id}")
+                break
+        
+        if not ai_agent_folder_id:
+            logger.warning(f"'AI Agent Issues' folder not found in {misclassification_mailbox}")
+            return 0
+        
+        # Step 2: Convert UTC dates to ISO format for Graph API
+        start_iso = start_date_utc.strftime('%Y-%m-%dT%H:%M:%S.000Z')
+        end_iso = end_date_utc.strftime('%Y-%m-%dT%H:%M:%S.000Z')
+        
+        # Step 3: Fetch emails from the specific folder with date filtering
+        params = {
+            "$filter": f"receivedDateTime ge {start_iso} and receivedDateTime lt {end_iso}",
+            "$select": "id",  # Only need count, not content
+            "$top": 1000  # Limit to prevent timeout
+        }
+        
+        folder_emails_url = f"{MS_GRAPH_BASE_URL}/users/{misclassification_mailbox}/mailFolders/{ai_agent_folder_id}/messages"
+        
+        logger.info(f"Fetching emails from 'AI Agent Issues' folder")
+        logger.info(f"Time range: {start_iso} to {end_iso}")
+        
+        response = httpx.get(folder_emails_url, headers=headers, params=params, timeout=60)
+        
+        if response.status_code != 200:
+            logger.error(f"Failed to fetch misclassification emails from folder: {response.status_code} - {response.text}")
+            return 0
+        
+        emails = response.json().get("value", [])
+        total_count = len(emails)
+        
+        logger.info(f"Found {total_count} misclassification emails in 'AI Agent Issues' folder")
+        
+        return total_count
+        
+    except Exception as e:
+        logger.error(f"Error fetching misclassification count: {e}")
+        return 0
+
+def send_enhanced_report_email(report_html, report_date, recipients):
+    """Send enhanced daily report email with HTML table format."""
     try:
         # Create MSGraphClient to get access token
         graph_client = MSGraphClient()
@@ -1043,16 +1356,13 @@ def send_simple_report_email(report_text, report_date, recipients):
         
         # Enhanced email formatting
         to_recipients = [{"emailAddress": {"address": email}} for email in recipients]
-        subject = f"Daily Email Processing Report - {report_date} (ET)"
-        
-        # Add HTML formatting for better readability
-        html_body = report_text.replace('\n', '<br>').replace('===', '<b>===').replace('==', '==</b>')
+        subject = f"📊 Daily Email Processing Report - {report_date} (ET) - Table Format"
         
         message = {
             "subject": subject,
             "body": {
                 "contentType": "HTML", 
-                "content": f"<html><body style='font-family: monospace; white-space: pre-line;'>{html_body}</body></html>"
+                "content": report_html
             },
             "toRecipients": to_recipients,
             "importance": "Normal"
@@ -1064,7 +1374,7 @@ def send_simple_report_email(report_text, report_date, recipients):
         response = httpx.post(endpoint, headers=headers, json=payload, timeout=30)
         
         if response.status_code in [200, 202]:
-            logger.info(f"Daily report sent to {len(recipients)} recipients")            
+            logger.info(f"Enhanced HTML table report sent to {len(recipients)} recipients")            
             return True
         else:
             logger.error(f"Failed to send report: {response.status_code} - {response.text}")

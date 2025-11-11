@@ -92,7 +92,7 @@ def get_batch_size():
 
 def get_batch_interval():
     """Get batch interval in seconds (convert minutes to seconds)"""
-    minutes = int(os.getenv("BATCH_INTERVAL_MINUTES", 10))
+    minutes = 60
     return minutes * 60  # Convert to seconds
 
 def wait_for_model_recovery(stop_event, max_retries=3):

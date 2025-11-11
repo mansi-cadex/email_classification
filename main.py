@@ -166,7 +166,7 @@ def log_startup_config():
     logger.info(f"- FORCE_DRAFTS: {os.getenv('FORCE_DRAFTS', 'True')}")
     logger.info(f"- SFTP_ENABLED: {os.getenv('SFTP_ENABLED', 'False')}")
     logger.info(f"- BATCH_SIZE: {os.getenv('BATCH_SIZE', '50')} (from env)")
-    logger.info(f"- BATCH_INTERVAL: {os.getenv('BATCH_INTERVAL_MINUTES', '10')} minutes (from env)")
+    logger.info(f"- BATCH_INTERVAL: 60 minutes (hardcoded)")
     
     # SECURITY: Log API key status
     if API_KEY == "default-secret-key-change-me":
