@@ -614,7 +614,7 @@ class EmailProcessor:
             self.mongo.set_batch_id(batch_id)
     
     def _process_single_email(self, msg):
-        """Process a single email with UNIFIED stop signal."""
+        """Process a single email with UNIFIED stop signal and enhanced attachment detection."""
         # CHECK UNIFIED STOP BEFORE PROCESSING EACH EMAIL
         if self.stop_event.is_set():
             logger.info("STOP: Stop signal detected during email processing - stopping NOW")
@@ -629,8 +629,56 @@ class EmailProcessor:
         sender_name = sender_info.get("name", sender)
         subject = msg.get("subject", "")
         received = msg.get("receivedDateTime", "")
-        has_attachments = msg.get("hasAttachments", False)
         conversation_id = msg.get("conversationId", "")
+        
+        # Enhanced attachment detection - Start with Graph API value
+        has_attachments = msg.get("hasAttachments", False)
+        
+        # Check for inline attachments in HTML content (pasted images, embedded content)
+        if not has_attachments:  # Only check if no traditional attachments found
+            try:
+                unique_body = msg.get("uniqueBody", {})
+                full_body = msg.get("body", {})
+                
+                for body_obj in [unique_body, full_body]:
+                    if body_obj and body_obj.get("contentType", "").lower() == "html":
+                        html_content = body_obj.get("content", "")
+                        if html_content:
+                            # Check for base64 encoded images (pasted screenshots/images)
+                            base64_patterns = [
+                                r'data:image/[^;]+;base64,',
+                                r'src="data:image/',
+                                r'<img[^>]*data:image'
+                            ]
+                            
+                            # Check for Content-ID references (embedded attachments)
+                            cid_patterns = [
+                                r'src="cid:[^"]+',
+                                r'background[^>]*cid:',
+                                r'url\(cid:[^)]+\)'
+                            ]
+                            
+                            # Check for inline image patterns
+                            inline_image_patterns = [
+                                r'<img[^>]*src=["\'][^"\']*["\'][^>]*>',
+                                r'background-image:\s*url\([^)]+\)',
+                                r'<object[^>]*data=[^>]*>',
+                                r'<embed[^>]*src=[^>]*>'
+                            ]
+                            
+                            # Combine all patterns for comprehensive detection
+                            all_patterns = base64_patterns + cid_patterns + inline_image_patterns
+                            
+                            for pattern in all_patterns:
+                                if re.search(pattern, html_content, re.IGNORECASE):
+                                    has_attachments = True  # Update existing variable
+                                    logger.info(f"Detected inline attachment/image in email {message_id} - updating has_attachments to True")
+                                    break
+                            
+                            if has_attachments:
+                                break
+            except Exception as e:
+                logger.warning(f"Error during inline attachment detection for {message_id}: {e}")
         
         # ✅ Extract headers for model API
         headers = msg.get("internetMessageHeaders", [])
@@ -658,7 +706,7 @@ class EmailProcessor:
         if recipient and "@abc-amega.com" in recipient.lower():
             receiver_type = "internal"
         
-        logger.info(f"Processing email {message_id} from {sender} | Account: {source_account}")
+        logger.info(f"Processing email {message_id} from {sender} | Account: {source_account} | Attachments: {has_attachments}")
         
         # Check for duplicates
         if self.mongo and self.mongo.email_exists(message_id):
@@ -670,14 +718,14 @@ class EmailProcessor:
             logger.info("STOP: Stop signal detected before model API call - stopping NOW")
             return False
         
-        # ✅ Call model API with headers
+        # ✅ Call model API with enhanced attachment detection
         model_response = self.model_api.process_email_complete(
             subject=subject,
             body=clean_body,
             headers=headers,
             sender_email=sender,
             recipient_emails=recipient_emails,
-            has_attachments=has_attachments,
+            has_attachments=has_attachments,  # Enhanced detection included
             had_threads=had_threads
         )
         
@@ -764,7 +812,7 @@ class EmailProcessor:
             "subject": subject,
             "body": clean_body,
             "received_at": received,
-            "has_attachments": has_attachments,
+            "has_attachments": has_attachments,  # Enhanced attachment detection included
             "source_account": source_account,
             "conversation_id": conversation_id,
             "receiver_type": receiver_type,
