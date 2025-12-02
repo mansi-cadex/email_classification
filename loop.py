@@ -29,7 +29,7 @@ from dotenv import load_dotenv
 from typing import Tuple, Dict, List, Optional, Any
 
 # Import from refactored modules
-from src.fetch_reply import process_unread_emails, generate_daily_report
+from src.fetch_reply import process_unread_emails, generate_daily_report, SEND_INVOICE_REQUEST_NO_INFO, SEND_CLAIMS_PAID_NO_PROOF
 from src.db import get_mongo, get_postgres, PostgresConnector
 from src.log_config import logger
 
@@ -37,8 +37,6 @@ from src.log_config import logger
 load_dotenv()
 
 # Configuration - Hardcoded settings (no DevOps dependency)
-MAIL_SEND_ENABLED = os.getenv("MAIL_SEND_ENABLED", "False").lower() in ["true", "yes", "1"]
-FORCE_DRAFTS = os.getenv("FORCE_DRAFTS", "True").lower() in ["true", "yes", "1"]
 _last_report_date = None
 
 # SFTP Configuration
@@ -590,8 +588,7 @@ def process_batch(batch_id: Optional[str] = None, stop_event=None) -> Tuple[bool
             return False, 0, 0, 0
     
     logger.info(f"Processing batch {batch_id} (max {batch_size} emails)")
-    logger.info(f"Mail sending is {'ENABLED' if MAIL_SEND_ENABLED else 'DISABLED'}, Force drafts is {'ENABLED' if FORCE_DRAFTS else 'DISABLED'}")
-
+    logger.info(f"Invoice requests send directly: {SEND_INVOICE_REQUEST_NO_INFO}, Claims paid send directly: {SEND_CLAIMS_PAID_NO_PROOF}")
     # Ensure batch record exists
     ensure_batch_record_exists(batch_id)
 
@@ -912,8 +909,8 @@ def run_email_processor(stop_event=None):
     batch_interval = get_batch_interval()
 
     logger.info(f"Starting email batch processor (batch size: {batch_size}, interval: {batch_interval}s)")
-    logger.info(f"Mail sending is {'ENABLED' if MAIL_SEND_ENABLED else 'DISABLED'}")
-    logger.info(f"Force drafts is {'ENABLED' if FORCE_DRAFTS else 'DISABLED'}")
+    logger.info(f"Invoice requests - Send directly: {SEND_INVOICE_REQUEST_NO_INFO}")
+    logger.info(f"Claims paid - Send directly: {SEND_CLAIMS_PAID_NO_PROOF}")
     logger.info(f"SFTP export is {'ENABLED' if SFTP_ENABLED else 'DISABLED'}")
     
     model_url = "http://104.197.197.76:8000"

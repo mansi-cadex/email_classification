@@ -142,7 +142,7 @@ def get_logs():
         return jsonify({"success": False, "message": str(e)}), 500
 
 def log_startup_config():
-    """Log startup configuration"""
+    """Log startup configuration with updated granular sending config"""
     logger.info("=== Email Processing System Starting ===")
     
     # Log model configuration  
@@ -160,10 +160,17 @@ def log_startup_config():
     else:
         logger.warning("No EMAIL_ADDRESS configured!")
     
+    # Log new granular sending configuration
+    try:
+        from src.fetch_reply import SEND_INVOICE_REQUEST_NO_INFO, SEND_CLAIMS_PAID_NO_PROOF
+        logger.info("Email Sending Configuration:")
+        logger.info(f"- Invoice requests - Send directly: {SEND_INVOICE_REQUEST_NO_INFO}")
+        logger.info(f"- Claims paid - Send directly: {SEND_CLAIMS_PAID_NO_PROOF}")
+    except ImportError as e:
+        logger.warning(f"Could not import sending config: {e}")
+    
     # Log key settings
-    logger.info("Settings:")
-    logger.info(f"- MAIL_SEND_ENABLED: {os.getenv('MAIL_SEND_ENABLED', 'False')}")
-    logger.info(f"- FORCE_DRAFTS: {os.getenv('FORCE_DRAFTS', 'True')}")
+    logger.info("System Settings:")
     logger.info(f"- SFTP_ENABLED: {os.getenv('SFTP_ENABLED', 'False')}")
     logger.info(f"- BATCH_SIZE: {os.getenv('BATCH_SIZE', '50')} (from env)")
     logger.info(f"- BATCH_INTERVAL: 60 minutes (hardcoded)")
@@ -176,6 +183,7 @@ def log_startup_config():
         
     # Log unified signal handling
     logger.info("✅ Unified signal handling enabled (Issue #6 fixed)")
+    logger.info("✅ Granular email sending configuration active")
 
 def setup_signal_handlers():
     """Setup graceful shutdown signal handlers with UNIFIED stop mechanism"""

@@ -22,7 +22,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-RESPONSE_LABELS = ["invoice_request_no_info","invoice_request_with_info" ,"claims_paid_no_proof"]
+RESPONSE_LABELS = ["invoice_request_no_info" , "claims_paid_no_proof"]
 
 class MongoConnector:
     """MongoDB operations for email classification system with TLS enforcement."""

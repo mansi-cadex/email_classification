@@ -36,6 +36,8 @@ EMAIL_ADDRESS = "ABCcollectionsteamD@abc-amega.com,ABCcollectionsteamI@abc-amega
 YOUR_DOMAIN = os.getenv("YOUR_DOMAIN", "abc-amega.com")
 MODEL_API_URL = "http://104.197.197.76:8000"
 COMPANY_NAME = os.getenv("COMPANY_NAME", "ABC/AMEGA")
+SEND_INVOICE_REQUEST_NO_INFO = False  # Set to True to send directly, False for draft
+SEND_CLAIMS_PAID_NO_PROOF = False    # Set to True to send directly, False for draft
 
 # Updated list of allowed labels
 ALLOWED_LABELS = [
@@ -52,8 +54,7 @@ ALLOWED_LABELS = [
 ]
 # Labels that should receive responses
 RESPONSE_LABELS = [
-    "invoice_request_no_info",
-    "invoice_request_with_info",  
+    "invoice_request_no_info", 
     "claims_paid_no_proof"
 ]
 
@@ -474,6 +475,65 @@ class MSGraphClient:
         
         return None
 
+    def send_threaded_reply_directly(self, original_message_id, reply_text, from_account):
+        """Send threaded reply directly (not as draft)."""
+        access_token = self.get_access_token()
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json"
+        }
+        
+        # Add footer
+        footer = f"\n\n---\nThis email was generated automatically by {COMPANY_NAME} System.\nSent on: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}"
+        body_with_footer = reply_text + footer
+        
+        try:
+            # STEP 1: Create reply draft first
+            create_reply_endpoint = f"{self.base_url}/users/{from_account}/messages/{original_message_id}/createReply"
+            
+            response = httpx.post(create_reply_endpoint, headers=headers, json={}, timeout=30)
+            
+            if response.status_code in [200, 201]:
+                draft_data = response.json()
+                draft_id = draft_data.get("id")
+                
+                if draft_id:
+                    # STEP 2: Update the draft with our content
+                    update_payload = {
+                        "body": {
+                            "contentType": "Text",
+                            "content": body_with_footer
+                        }
+                    }
+                    
+                    update_endpoint = f"{self.base_url}/users/{from_account}/messages/{draft_id}"
+                    update_response = httpx.patch(update_endpoint, headers=headers, json=update_payload, timeout=30)
+                    
+                    if update_response.status_code in [200, 204]:
+                        # STEP 3: Send the draft
+                        send_endpoint = f"{self.base_url}/users/{from_account}/messages/{draft_id}/send"
+                        send_response = httpx.post(send_endpoint, headers=headers, json={}, timeout=30)
+                        
+                        if send_response.status_code in [200, 202]:
+                            logger.info(f"Threaded reply sent directly: {draft_id}")
+                            return True
+                        else:
+                            logger.error(f"Failed to send reply: {send_response.status_code}")
+                            return False
+                    else:
+                        logger.error(f"Failed to update draft: {update_response.status_code}")
+                        return False
+                else:
+                    logger.error("No draft ID returned from createReply")
+                    return False
+            else:
+                logger.error(f"createReply failed: {response.status_code} - {response.text}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error sending threaded reply directly: {e}")
+            return False
+
     def attach_files_to_draft(self, draft_id: str, from_account: str, file_paths: List[str]) -> int:
         """
         Attach files to an existing draft email
@@ -747,6 +807,14 @@ class EmailProcessor:
         contact_status = model_response.get("contact_status", "active")
         cleaned_body = model_response.get("cleaned_body", "")
         
+        # FEATURE 1: Add sender email to cleaned_body (first line in double quotes)
+        if sender and cleaned_body:
+            cleaned_body = f'"{sender}"\n\n{cleaned_body}'
+            logger.info(f"Added sender email to cleaned_body: {sender}")
+        elif sender and not cleaned_body:
+            cleaned_body = f'"{sender}"'
+            logger.info(f"Set cleaned_body to sender email only: {sender}")
+        
         # Validate event type
         if event_type not in ALLOWED_LABELS:
             event_type = "uncategorised"
@@ -760,6 +828,7 @@ class EmailProcessor:
         draft_id = None
         invoices_attached = False
         invoice_count = 0
+        email_sent_directly = False  # Track if email was sent directly
         
         if event_type in RESPONSE_LABELS:
             # CHECK UNIFIED STOP BEFORE REPLY GENERATION
@@ -786,16 +855,52 @@ class EmailProcessor:
             if reply_text:
                 logger.info(f"Reply generated: {len(reply_text)} chars")
                 
-                # Create draft with reply text
-                draft_id = self.graph_client.create_threaded_reply_draft(
-                    message_id, reply_text, source_account
-                )
+                # FEATURE 2: Check per-response-type sending configuration - ONLY 2 TYPES
+                should_send_directly = False
                 
-                if draft_id:
-                    logger.info(f"Threaded draft saved: {draft_id}")
-                    draft_created = True
+                if event_type == "invoice_request_no_info":
+                    should_send_directly = SEND_INVOICE_REQUEST_NO_INFO
+                    logger.info(f"Invoice request (no info) - Send directly: {should_send_directly}")
+                elif event_type == "claims_paid_no_proof":
+                    should_send_directly = SEND_CLAIMS_PAID_NO_PROOF
+                    logger.info(f"Claims paid (no proof) - Send directly: {should_send_directly}")
+                
+                if should_send_directly:
+                    # Send email directly using Graph API
+                    try:
+                        success = self.graph_client.send_threaded_reply_directly(
+                            message_id, reply_text, source_account
+                        )
+                        if success:
+                            logger.info(f"Email sent directly for {event_type}")
+                            email_sent_directly = True
+                        else:
+                            logger.warning(f"Direct send failed, creating draft instead")
+                            draft_id = self.graph_client.create_threaded_reply_draft(
+                                message_id, reply_text, source_account
+                            )
+                            if draft_id:
+                                draft_created = True
+                                logger.info(f"Fallback draft created: {draft_id}")
+                    except Exception as e:
+                        logger.error(f"Error sending email directly: {e}, creating draft instead")
+                        draft_id = self.graph_client.create_threaded_reply_draft(
+                            message_id, reply_text, source_account
+                        )
+                        if draft_id:
+                            draft_created = True
+                            logger.info(f"Fallback draft created: {draft_id}")
                 else:
-                    logger.warning(f"Threaded draft save failed")
+                    # Create draft as usual
+                    draft_id = self.graph_client.create_threaded_reply_draft(
+                        message_id, reply_text, source_account
+                    )
+                    
+                    if draft_id:
+                        logger.info(f"Threaded draft saved: {draft_id}")
+                        draft_created = True
+                    else:
+                        logger.warning(f"Threaded draft save failed")
         
         # CHECK UNIFIED STOP BEFORE MONGODB STORAGE
         if self.stop_event.is_set():
@@ -828,14 +933,14 @@ class EmailProcessor:
             "new_contact_email": new_contact_email,
             "new_contact_phone": new_contact_phone,
             "contact_status": contact_status,
-            "cleaned_body": cleaned_body,
+            "cleaned_body": cleaned_body,  # Now includes sender email
             
             # Client fields
             "debtor_id": debtor_id,
             "classification": event_type,
             "prediction": event_type,
             "response": reply_text,
-            "response_sent": False if reply_text else None,
+            "response_sent": email_sent_directly,  # True if sent directly, False if draft
             "draft_created": draft_created,
             "draft_id": draft_id,
             "invoices_attached": invoices_attached,
