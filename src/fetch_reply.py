@@ -809,10 +809,10 @@ class EmailProcessor:
         
         # FEATURE 1: Add sender email to cleaned_body (first line in double quotes)
         if sender and cleaned_body:
-            cleaned_body = f'"{sender}"\n\n{cleaned_body}'
+            cleaned_body = f'sender mail : "{sender}"\n\n{cleaned_body}'
             logger.info(f"Added sender email to cleaned_body: {sender}")
         elif sender and not cleaned_body:
-            cleaned_body = f'"{sender}"'
+            cleaned_body = f'sender mail : "{sender}"'
             logger.info(f"Set cleaned_body to sender email only: {sender}")
         
         # Validate event type
