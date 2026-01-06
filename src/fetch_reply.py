@@ -124,7 +124,8 @@ class ModelAPIClient:
             logger.error(f"Unexpected model API error: {e} - classifying as manual_review")
             return self._get_manual_review_fallback()
 
-    def generate_reply(self, subject, body, label, sender_name=None, entities=None):
+    def generate_reply(self, subject, body, label, sender_name=None, sender_email=None, 
+                       recipient_email=None, entities=None):
         """Generate reply - 60 second timeout, no reply if timeout."""
         if label not in RESPONSE_LABELS:
             return ""
@@ -134,6 +135,8 @@ class ModelAPIClient:
             "body": body,
             "label": label,
             "sender_name": sender_name,
+            "sender_email": sender_email,
+            "recipient_email": recipient_email,
             "entities": entities or {}
         }
         
@@ -815,6 +818,13 @@ class EmailProcessor:
             cleaned_body = f'sender mail : "{sender}"'
             logger.info(f"Set cleaned_body to sender email only: {sender}")
         
+        # FEATURE 2: Pad cleaned_body to minimum 256 characters for SSIS compatibility
+        # SSIS samples first 8 rows - if all are < 256 chars, it assumes DT_WSTR (255 limit) instead of DT_NTEXT
+        if len(cleaned_body) < 256:
+            padding_needed = 256 - len(cleaned_body)
+            cleaned_body = cleaned_body + " " * padding_needed
+            logger.info(f"Padded cleaned_body to 256 characters (added {padding_needed} spaces) for SSIS compatibility")
+        
         # Validate event type
         if event_type not in ALLOWED_LABELS:
             event_type = "uncategorised"
@@ -839,12 +849,32 @@ class EmailProcessor:
             # Map invoice_request_with_info to use invoice_request_no_info reply template
             reply_label = "invoice_request_no_info" if event_type == "invoice_request_with_info" else event_type
             
-            # Generate reply text from model
+            # Build entities dict from model response for better context
+            entities = {}
+            if debtor_number:
+                entities["debtor_number"] = debtor_number
+            if company_name:
+                entities["company_name"] = company_name
+            if invoice_number:
+                entities["invoice_number"] = invoice_number
+            if sender:
+                entities["sender_email"] = sender
+            if recipient_emails:
+                entities["emails"] = recipient_emails
+                entities["email"] = recipient_emails[0] if recipient_emails else None
+            
+            # Determine recipient_email (where reply will be sent - usually the sender)
+            reply_recipient_email = recipient_emails[0] if recipient_emails else sender
+            
+            # Generate reply text from model with all available context
             reply_text = self.model_api.generate_reply(
                 subject=subject,
                 body=clean_body, 
                 label=reply_label,  # Both invoice labels use same template
-                sender_name=sender_name
+                sender_name=sender_name,
+                sender_email=sender,
+                recipient_email=reply_recipient_email,
+                entities=entities
             )
             
             # CHECK UNIFIED STOP AFTER REPLY GENERATION

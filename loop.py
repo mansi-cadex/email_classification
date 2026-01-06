@@ -464,10 +464,19 @@ def export_processed_emails_to_excel(batch_id: str, stop_event=None) -> Optional
         if len(cleaned_body) > 32767:
             cleaned_body = cleaned_body[:32764] + "..."
         
+        # Pad cleaned_body to minimum 256 characters for SSIS compatibility
+        # SSIS samples first 8 rows - if all are < 256 chars, it assumes DT_WSTR (255 limit) instead of DT_NTEXT
+        if len(cleaned_body) < 256:
+            padding_needed = 256 - len(cleaned_body)
+            cleaned_body = cleaned_body + " " * padding_needed
+        
         # Get RAW values directly
         event_type_raw = e.get("event_type", "")
         target_folder_raw = e.get("target_folder", "")
         reply_sent = e.get("reply_sent", "no_response")
+        
+        # Get AI generated reply text
+        reply_text = e.get("response", "")
         
         # SECURITY FIX: Excel formula injection protection - sanitize all string fields
         sender = e.get("sender", "")
@@ -497,6 +506,10 @@ def export_processed_emails_to_excel(batch_id: str, stop_event=None) -> Optional
         if cleaned_body and cleaned_body.startswith(('=', '@', '+', '-', '\t', '\r')):
             cleaned_body = "'" + cleaned_body
             
+        # Sanitize reply text
+        if reply_text and reply_text.startswith(('=', '@', '+', '-', '\t', '\r')):
+            reply_text = "'" + reply_text
+            
         debtor_number = e.get("debtor_number", "")
         if debtor_number and debtor_number.startswith(('=', '@', '+', '-', '\t', '\r')):
             debtor_number = "'" + debtor_number
@@ -513,6 +526,7 @@ def export_processed_emails_to_excel(batch_id: str, stop_event=None) -> Optional
         if contact_status and contact_status.startswith(('=', '@', '+', '-', '\t', '\r')):
             contact_status = "'" + contact_status
         
+        # Create original row
         row = {
             # CLIENT DATA - Basic email metadata (SANITIZED)
             "EmailFrom": sender,
@@ -532,7 +546,39 @@ def export_processed_emails_to_excel(batch_id: str, stop_event=None) -> Optional
             "ContactStatus": contact_status
         }
         
+        # Add original row
         rows.append(row)
+        
+        # Check if this email needs a duplicate row with reply
+        has_ai_reply = bool(reply_text.strip())
+        needs_reply_duplicate = event_type_raw in ["invoice_request_no_info", "claims_paid_no_proof"]
+        
+        if has_ai_reply and needs_reply_duplicate:
+            # Create cleaned body with only reply text
+            enhanced_cleaned_body = f"Reply:\n{reply_text}"
+            
+            # Truncate if too long for Excel
+            if len(enhanced_cleaned_body) > 32767:
+                enhanced_cleaned_body = enhanced_cleaned_body[:32764] + "..."
+            
+            # Pad enhanced_cleaned_body to minimum 256 characters for SSIS compatibility
+            if len(enhanced_cleaned_body) < 256:
+                padding_needed = 256 - len(enhanced_cleaned_body)
+                enhanced_cleaned_body = enhanced_cleaned_body + " " * padding_needed
+            
+            # Sanitize enhanced cleaned body
+            if enhanced_cleaned_body and enhanced_cleaned_body.startswith(('=', '@', '+', '-', '\t', '\r')):
+                enhanced_cleaned_body = "'" + enhanced_cleaned_body
+            
+            # Create duplicate row with modified fields
+            duplicate_row = row.copy()  # Copy all fields from original
+            duplicate_row["Event Type"] = f"{event_type_raw}_with_reply"  # Add _with_reply suffix
+            duplicate_row["CleanedBody"] = enhanced_cleaned_body  # Enhanced cleaned body
+            
+            # Add duplicate row
+            rows.append(duplicate_row)
+            
+            logger.info(f"Created duplicate entry for {event_type_raw} with AI reply")
 
     df = pd.DataFrame(rows)
     
@@ -560,7 +606,12 @@ def export_processed_emails_to_excel(batch_id: str, stop_event=None) -> Optional
     df.to_excel(buf, index=False)
     buf.seek(0)
     
-    logger.info(f"Excel export complete: {len(emails)} emails processed for batch {batch_id} (13 columns, formula injection protected)")
+    # Update logging to reflect potential duplicates
+    original_email_count = len(emails)
+    total_rows = len(rows)
+    duplicate_count = total_rows - original_email_count
+    
+    logger.info(f"Excel export complete: {original_email_count} emails processed for batch {batch_id} ({total_rows} total rows, {duplicate_count} duplicate entries with replies, 13 columns, formula injection protected)")
     
     # Upload to SFTP with stop signal
     upload_success = upload_to_sftp(fname, buf.getvalue(), stop_event=stop_event)
