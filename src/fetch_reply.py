@@ -215,11 +215,11 @@ def extract_clean_email_content(msg):
     data_source = ""
     had_threads = False
     
-    # Try uniqueBody first (excludes threads)
+    # Get both uniqueBody and fullBody
     unique_body = msg.get("uniqueBody", {})
     full_body = msg.get("body", {})
     
-    # Check if email has threads
+    # Check if email has threads (compare lengths)
     if unique_body and unique_body.get("content") and full_body and full_body.get("content"):
         unique_content = unique_body.get("content", "").strip()
         full_content = full_body.get("content", "").strip()
@@ -227,7 +227,21 @@ def extract_clean_email_content(msg):
         if len(unique_content) > 0 and len(full_content) > len(unique_content) * 1.2:
             had_threads = True
     
-    if unique_body and unique_body.get("content"):
+    # FIX: Match test.py behavior - when had_threads=False, use FULL body (like test.py uses full .eml)
+    # This ensures the model sees the same content as test.py for non-threaded emails
+    if not had_threads and full_body and full_body.get("content"):
+        # Use full body for non-threaded emails (matches test.py behavior)
+        content = full_body.get("content", "").strip()
+        content_type = full_body.get("contentType", "").lower()
+        
+        if content_type == "text":
+            clean_body = content
+            data_source = "body_text"
+        elif content_type == "html":
+            clean_body = html_to_text(content)
+            data_source = "body_html"
+    elif had_threads and unique_body and unique_body.get("content"):
+        # For threaded emails, use uniqueBody (current reply only)
         content = unique_body.get("content", "").strip()
         content_type = unique_body.get("contentType", "").lower()
         
@@ -238,7 +252,7 @@ def extract_clean_email_content(msg):
             clean_body = html_to_text(content)
             data_source = "uniqueBody_html"
     
-    # Fallback to full body
+    # Fallback to full body if uniqueBody didn't work for threaded emails
     if not clean_body and full_body and full_body.get("content"):
         content = full_body.get("content", "").strip()
         content_type = full_body.get("contentType", "").lower()
