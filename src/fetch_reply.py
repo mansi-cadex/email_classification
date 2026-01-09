@@ -708,10 +708,14 @@ class EmailProcessor:
         received = msg.get("receivedDateTime", "")
         conversation_id = msg.get("conversationId", "")
         
-        # Enhanced attachment detection - Start with Graph API value
+        # Enhanced attachment detection - matching test.py logic
+        # Step 1: Start with Graph API value (actual attachments)
         has_attachments = msg.get("hasAttachments", False)
+        proof_attachments = []
+        inline_images_non_proof = []
         
-        # Check for inline attachments in HTML content (pasted images, embedded content)
+        # Step 2: Check for inline attachments in HTML content, but filter out logos/signatures
+        # Only count inline images as proof if they're PDFs or have proof-related filenames
         if not has_attachments:  # Only check if no traditional attachments found
             try:
                 unique_body = msg.get("uniqueBody", {})
@@ -721,41 +725,91 @@ class EmailProcessor:
                     if body_obj and body_obj.get("contentType", "").lower() == "html":
                         html_content = body_obj.get("content", "")
                         if html_content:
-                            # Check for base64 encoded images (pasted screenshots/images)
+                            # Extract filenames from CID references (e.g., cid:image001.png@01DC7FB8.F63AF040)
+                            cid_filename_pattern = r'cid:([^@\s"\'<>]+)'
+                            cid_filenames = re.findall(cid_filename_pattern, html_content, re.IGNORECASE)
+                            
+                            # Extract filenames from img src attributes
+                            img_src_pattern = r'<img[^>]*src=["\']([^"\']+)["\']'
+                            img_srcs = re.findall(img_src_pattern, html_content, re.IGNORECASE)
+                            
+                            # Extract filenames from object/embed data attributes
+                            object_data_pattern = r'<object[^>]*data=["\']([^"\']+)["\']'
+                            object_data = re.findall(object_data_pattern, html_content, re.IGNORECASE)
+                            
+                            # Combine all extracted filenames
+                            all_filenames = cid_filenames + img_srcs + object_data
+                            
+                            # Check for base64 encoded images (often screenshots of receipts - could be proof)
                             base64_patterns = [
                                 r'data:image/[^;]+;base64,',
                                 r'src="data:image/',
                                 r'<img[^>]*data:image'
                             ]
+                            has_base64_image = any(re.search(pattern, html_content, re.IGNORECASE) for pattern in base64_patterns)
                             
-                            # Check for Content-ID references (embedded attachments)
-                            cid_patterns = [
-                                r'src="cid:[^"]+',
-                                r'background[^>]*cid:',
-                                r'url\(cid:[^)]+\)'
-                            ]
+                            # Process each filename found
+                            for filename in all_filenames:
+                                filename_lower = filename.lower()
+                                
+                                # Filter out common logo/signature filenames
+                                is_logo_or_signature = any(pattern in filename_lower for pattern in [
+                                    "logo", "signature", "sig", "banner", "header", "footer",
+                                    "image001", "image002", "image003", "~wrd", "cid:",
+                                    "company", "brand", "icon"
+                                ])
+                                
+                                # Check if it's a PDF or has proof-related filename
+                                is_pdf = filename_lower.endswith('.pdf')
+                                has_proof_keyword = any(keyword in filename_lower for keyword in [
+                                    "receipt", "proof", "payment", "statement", "invoice",
+                                    "confirmation", "transaction", "check", "wire", "ach"
+                                ])
+                                
+                                # Count as proof attachment if:
+                                # 1. It's a PDF (likely proof document)
+                                # 2. Filename suggests proof (receipt, proof, payment, etc.)
+                                # 3. NOT a logo/signature
+                                is_proof_likely = (is_pdf or has_proof_keyword) and not is_logo_or_signature
+                                
+                                if is_proof_likely:
+                                    has_attachments = True
+                                    proof_attachments.append({
+                                        "filename": filename,
+                                        "type": "inline_proof"
+                                    })
+                                    logger.info(f"Detected proof inline attachment in email {message_id}: {filename}")
+                                else:
+                                    inline_images_non_proof.append({
+                                        "filename": filename,
+                                        "is_logo": is_logo_or_signature
+                                    })
                             
-                            # Check for inline image patterns
-                            inline_image_patterns = [
-                                r'<img[^>]*src=["\'][^"\']*["\'][^>]*>',
-                                r'background-image:\s*url\([^)]+\)',
-                                r'<object[^>]*data=[^>]*>',
-                                r'<embed[^>]*src=[^>]*>'
-                            ]
-                            
-                            # Combine all patterns for comprehensive detection
-                            all_patterns = base64_patterns + cid_patterns + inline_image_patterns
-                            
-                            for pattern in all_patterns:
-                                if re.search(pattern, html_content, re.IGNORECASE):
-                                    has_attachments = True  # Update existing variable
-                                    logger.info(f"Detected inline attachment/image in email {message_id} - updating has_attachments to True")
-                                    break
+                            # Base64 images (screenshots) - could be proof, but be conservative
+                            # Only count if we haven't found any proof attachments yet
+                            if has_base64_image and not has_attachments:
+                                # Base64 images are often screenshots of receipts, so count as potential proof
+                                has_attachments = True
+                                proof_attachments.append({
+                                    "filename": "base64_screenshot",
+                                    "type": "base64_image"
+                                })
+                                logger.info(f"Detected base64 encoded image in email {message_id} - treating as potential proof")
                             
                             if has_attachments:
                                 break
+                            
+                            # Log non-proof inline images for debugging
+                            if inline_images_non_proof:
+                                logger.debug(f"Found {len(inline_images_non_proof)} inline images (non-proof) in email {message_id}")
             except Exception as e:
                 logger.warning(f"Error during inline attachment detection for {message_id}: {e}")
+        
+        # Log final attachment status
+        if has_attachments:
+            logger.info(f"Email {message_id} has proof attachments: {len(proof_attachments)} proof attachment(s)")
+        elif inline_images_non_proof:
+            logger.debug(f"Email {message_id} has {len(inline_images_non_proof)} inline images (non-proof, filtered out)")
         
         # ✅ Extract headers for model API
         headers = msg.get("internetMessageHeaders", [])
