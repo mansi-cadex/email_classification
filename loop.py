@@ -39,6 +39,9 @@ load_dotenv()
 # Configuration - Hardcoded settings (no DevOps dependency)
 _last_report_date = None
 
+# Export format configuration: "csv" (default) or "excel"
+EXPORT_FORMAT = "csv"
+
 # SFTP Configuration
 SFTP_HOST = os.getenv("SFTP_HOST")
 SFTP_PORT = int(os.getenv("SFTP_PORT", "22"))
@@ -49,7 +52,7 @@ SFTP_ENABLED = os.getenv("SFTP_ENABLED", "False").lower() in ["true", "yes", "1"
 CLIENT_ID = os.getenv("CLIENT_ID")
 CLIENT_SECRET = os.getenv("CLIENT_SECRET")
 TENANT_ID = os.getenv("TENANT_ID")
-EMAIL_ADDRESS = "ABCcollectionsteamD@abc-amega.com,ABCcollectionsteamI@abc-amega.com"
+EMAIL_ADDRESS = "ABCcollectionsteamD@abc-amega.com,ABCcollectionsteamI@abc-amega.com,ABCcollectionsteamJ@abc-amega.com"
 
 def check_model_health(max_retries: int = 3, base_timeout: int = 60) -> bool:
     """Robust model health check with retries and backoff."""
@@ -429,7 +432,10 @@ def upload_to_sftp(filename: str, file_content: Optional[bytes] = None,
     return False
 
 def export_processed_emails_to_excel(batch_id: str, stop_event=None) -> Optional[str]:
-    """Export processed emails to Excel using MODEL DATA with UNIFIED stop signal and formula injection protection."""
+    """Export processed emails to CSV or Excel using MODEL DATA with UNIFIED stop signal and formula injection protection.
+
+    NOTE: Actual format is controlled by EXPORT_FORMAT config ("csv" or "excel").
+    """
     if not batch_id:
         return None
     
@@ -446,23 +452,19 @@ def export_processed_emails_to_excel(batch_id: str, stop_event=None) -> Optional
     if not emails:
         logger.info(f"No emails for batch {batch_id} to export")
         return None
-
+    
     if not SFTP_ENABLED:
-        logger.info("SFTP disabled - Excel report not generated")
+        logger.info("SFTP disabled - export not generated")
         return None
 
     rows = []
     
     for e in emails:
-        # Get email body and truncate if too long for Excel
+        # Get email body (no Excel cell length limit enforced here)
         email_body = e.get("body", "") or e.get("text", "")
-        if len(email_body) > 32767:
-            email_body = email_body[:32764] + "..."
         
-        # Get cleaned body from model (like test code)
+        # Get cleaned body from model (like test code, no Excel cell length limit enforced here)
         cleaned_body = e.get("cleaned_body", "")
-        if len(cleaned_body) > 32767:
-            cleaned_body = cleaned_body[:32764] + "..."
         
         # Pad cleaned_body to minimum 256 characters for SSIS compatibility
         # SSIS samples first 8 rows - if all are < 256 chars, it assumes DT_WSTR (255 limit) instead of DT_NTEXT
@@ -511,6 +513,12 @@ def export_processed_emails_to_excel(batch_id: str, stop_event=None) -> Optional
             reply_text = "'" + reply_text
             
         debtor_number = e.get("debtor_number", "")
+        # Force debtor_number (ABCFN) as STRING to prevent numeric conversion (e.g. 2877928.0)
+        if debtor_number:
+            debtor_number = str(debtor_number).rstrip('.0').rstrip('.')
+        else:
+            debtor_number = ""
+        # Protect against formula injection even in CSV (Excel import)
         if debtor_number and debtor_number.startswith(('=', '@', '+', '-', '\t', '\r')):
             debtor_number = "'" + debtor_number
             
@@ -582,6 +590,12 @@ def export_processed_emails_to_excel(batch_id: str, stop_event=None) -> Optional
 
     df = pd.DataFrame(rows)
     
+    # Ensure PrimaryFileNumber column remains STRING and strip any trailing ".0"
+    if "PrimaryFileNumber" in df.columns:
+        df["PrimaryFileNumber"] = df["PrimaryFileNumber"].astype(str).str.rstrip('.0').str.rstrip('.')
+        # Replace string "nan" that can appear after astype(str)
+        df["PrimaryFileNumber"] = df["PrimaryFileNumber"].replace('nan', '')
+    
     # Column order - 13 columns (added CleanedBody like test code)
     cols = [
         "EmailFrom", "EmailTo", "SubjectLine", "Date",
@@ -596,28 +610,43 @@ def export_processed_emails_to_excel(batch_id: str, stop_event=None) -> Optional
     
     df = df[cols]
     
-    # Generate filename
+    # Generate filename based on configured export format
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     batch_suffix = batch_id[-8:] if batch_id else uuid.uuid4().hex[:8]
-    fname = f"AI_Agent_Data_Load_{ts}_{batch_suffix}.xlsx"
-
-    # Write to Excel
-    buf = io.BytesIO()
-    df.to_excel(buf, index=False)
-    buf.seek(0)
+    use_excel = EXPORT_FORMAT == "excel"
+    extension = "xlsx" if use_excel else "csv"
+    fname = f"AI_Agent_Data_Load_{ts}_{batch_suffix}.{extension}"
+    
+    # Write to desired format
+    if use_excel:
+        # Excel export (legacy behavior) - use BytesIO
+        buf = io.BytesIO()
+        df.to_excel(buf, index=False)
+        buf.seek(0)
+        file_bytes = buf.getvalue()
+    else:
+        # CSV export with CRLF line endings for SSIS compatibility
+        # Use StringIO and then encode to UTF-8 bytes for SFTP upload
+        buf = io.StringIO()
+        df.to_csv(
+            buf,
+            index=False,
+            lineterminator='\r\n'
+        )
+        file_bytes = buf.getvalue().encode('utf-8')
     
     # Update logging to reflect potential duplicates
     original_email_count = len(emails)
     total_rows = len(rows)
     duplicate_count = total_rows - original_email_count
     
-    logger.info(f"Excel export complete: {original_email_count} emails processed for batch {batch_id} ({total_rows} total rows, {duplicate_count} duplicate entries with replies, 13 columns, formula injection protected)")
+    logger.info(f"{'Excel' if use_excel else 'CSV'} export complete: {original_email_count} emails processed for batch {batch_id} ({total_rows} total rows, {duplicate_count} duplicate entries with replies, 13 columns, formula injection protected)")
     
     # Upload to SFTP with stop signal
-    upload_success = upload_to_sftp(fname, buf.getvalue(), stop_event=stop_event)
+    upload_success = upload_to_sftp(fname, file_bytes, stop_event=stop_event)
     
     if upload_success:
-        logger.info(f"Excel file exported and uploaded: {fname}")
+        logger.info(f"{'Excel' if use_excel else 'CSV'} file exported and uploaded: {fname}")
     
     return fname if upload_success else None
 
