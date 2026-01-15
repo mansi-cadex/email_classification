@@ -616,8 +616,13 @@ def export_processed_emails_to_excel(batch_id: str, stop_event=None) -> Optional
     extension = "xlsx" if use_excel else "csv"
     fname = f"AI_Agent_Data_Load_{ts}_{batch_suffix}.{extension}"
     
+    # Log export format being used
+    logger.info(f"Export format configured: {EXPORT_FORMAT.upper()} - Generating {extension.upper()} file: {fname}")
+    logger.info(f"Total rows to export: {len(rows)} (from {len(emails)} emails)")
+    
     # Write to desired format
     if use_excel:
+        logger.info("Using Excel export format (legacy mode)")
         # Excel export (legacy behavior) - use BytesIO
         buf = io.BytesIO()
         df.to_excel(buf, index=False)
@@ -625,6 +630,8 @@ def export_processed_emails_to_excel(batch_id: str, stop_event=None) -> Optional
         file_bytes = buf.getvalue()
     else:
         # CSV export with CRLF line endings for SSIS compatibility
+        logger.info("Using CSV export format with CRLF line endings for SSIS compatibility")
+        logger.info("PrimaryFileNumber column forced as STRING to prevent numeric conversion")
         # Use StringIO and then encode to UTF-8 bytes for SFTP upload
         buf = io.StringIO()
         df.to_csv(
@@ -633,19 +640,30 @@ def export_processed_emails_to_excel(batch_id: str, stop_event=None) -> Optional
             lineterminator='\r\n'
         )
         file_bytes = buf.getvalue().encode('utf-8')
+        logger.info(f"CSV file generated in memory: {len(file_bytes):,} bytes")
     
     # Update logging to reflect potential duplicates
     original_email_count = len(emails)
     total_rows = len(rows)
     duplicate_count = total_rows - original_email_count
     
-    logger.info(f"{'Excel' if use_excel else 'CSV'} export complete: {original_email_count} emails processed for batch {batch_id} ({total_rows} total rows, {duplicate_count} duplicate entries with replies, 13 columns, formula injection protected)")
+    format_name = 'Excel' if use_excel else 'CSV'
+    logger.info(f"{format_name} export complete: {original_email_count} emails processed for batch {batch_id}")
+    logger.info(f"  - Total rows: {total_rows} ({duplicate_count} duplicate entries with replies)")
+    logger.info(f"  - Columns: 13")
+    logger.info(f"  - Formula injection protection: Enabled")
+    if not use_excel:
+        logger.info(f"  - Line endings: CRLF (\\r\\n) for SSIS compatibility")
+        logger.info(f"  - PrimaryFileNumber: Forced as STRING type")
     
     # Upload to SFTP with stop signal
+    logger.info(f"Uploading {format_name} file to SFTP: {fname}")
     upload_success = upload_to_sftp(fname, file_bytes, stop_event=stop_event)
     
     if upload_success:
-        logger.info(f"{'Excel' if use_excel else 'CSV'} file exported and uploaded: {fname}")
+        logger.info(f"✅ {format_name} file successfully exported and uploaded: {fname}")
+    else:
+        logger.warning(f"❌ {format_name} file generation completed but SFTP upload failed: {fname}")
     
     return fname if upload_success else None
 
