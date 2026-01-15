@@ -41,7 +41,6 @@ _last_report_date = None
 
 # Export format configuration: "csv" (default) or "excel"
 EXPORT_FORMAT = "csv"
-
 # SFTP Configuration
 SFTP_HOST = os.getenv("SFTP_HOST")
 SFTP_PORT = int(os.getenv("SFTP_PORT", "22"))
