@@ -150,7 +150,7 @@ def log_startup_config():
     logger.info(f"Model API URL: {model_url}")
     
     # Log email configuration
-    email_env = "ABCcollectionsteamD@abc-amega.com,ABCcollectionsteamI@abc-amega.com"
+    email_env = "ABCcollectionsteamD@abc-amega.com,ABCcollectionsteamI@abc-amega.com,ABCcollectionsteamJ@abc-amega.com"
     if email_env:
         if "," in email_env:
             emails = [e.strip() for e in email_env.split(",")]
