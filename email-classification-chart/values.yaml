@@ -1,0 +1,80 @@
+# Global settings
+namespace: develop
+image:
+  repository: us-central1-docker.pkg.dev/dandsltd-dev/email-classification/dev
+  tag: latest
+  pullPolicy: Always
+
+# Deployment settings
+deployment:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 25%
+      maxSurge: 25%
+  revisionHistoryLimit: 10
+  progressDeadlineSeconds: 600
+
+# Service settings
+service:
+  type: LoadBalancer
+  port: 80
+  targetPort: 5000
+  sessionAffinity: None
+  ipFamilies:
+    - IPv4
+  ipFamilyPolicy: SingleStack
+  internalTrafficPolicy: Cluster
+
+# ConfigMap settings
+config:
+  pythonUnbuffered: "1"
+  pythonDontWriteBytecode: "1"
+  pythonPath: "/app"
+  logLevel: "INFO"
+  logDir: "/app/logs"
+  maxRetries: "3"
+  retryDelay: "600"
+  mailSendEnabled: "False"
+  forceDrafts: "True"
+  msGraphTimeout: "60"
+  addEmailFooter: "true"
+  yourDomain: "abc-amega.com"
+  timeFilterHours: "24"
+  emailFetchTop: "1000"
+  dbHost: "10.60.0.5"
+  dbPort: "5432"
+  dbName: "o2c_dev"
+  dbSchema: "core"
+  dbType: "postgres"
+  mongoDb: "email_classification"
+  mongoCollection: "emails"
+  sftpHost: "sftp.abc-amega.com"
+  sftpPort: "22"
+  sftpEnabled: "True"
+  modelApiUrl: "http://34.72.113.155:8000"
+  batchSize: "30"
+  batchInterval: "6000"
+  batchTimeout: "4200"
+
+# Secret settings
+secrets:
+  dbPassword: "6uPeVbFdtYnR"
+  clientSecret: "-co8Q~HDf9cwB-_EPcrUjgjz_i..zXLqO2xP-b4X"
+  mongoUri: "mongodb+srv://emailuser:emailuser@email-classifier-db.ggjqzwq.mongodb.net/?retryWrites=true&w=majority&appName=email-classifier-db"
+  sftpPassword: "Pl@ying&Create1886!"
+  dbUsername: "postgres"
+  clientId: "15490cfa-bdae-4ad3-ba65-88378d5b41e1"
+  tenantId: "5c24e090-da3a-4b9e-90b2-7fed2a6e0f19"
+  emailAddress: "ABCcollectionsteamD@abc-amega.com,ABCcollectionsteamI@abc-amega.com,ABCcollectionsteamJ@abc-amega.com"
+  sftpUsername: "Sanskar"
+  # dbPassword: ""  # To be provided during deployment
+  # clientSecret: ""
+  # mongoUri: "" 
+  # sftpPassword: "" 
+  # dbUsername: "" 
+  # clientId: "" 
+  # tenantId: "" 
+  # emailAddress: ""  
+  # sftpUsername: ""  
