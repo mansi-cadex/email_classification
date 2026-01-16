@@ -41,6 +41,9 @@ _last_report_date = None
 
 # Export format configuration: "csv" (default) or "excel"
 EXPORT_FORMAT = "csv"
+# Outbound event rows configuration: Only create duplicate "_with_reply" rows if email was actually sent
+# Set to True to enable outbound event rows (only for actually sent emails), False to disable completely
+ENABLE_OUTBOUND_EVENT_ROWS = False
 # SFTP Configuration
 SFTP_HOST = os.getenv("SFTP_HOST")
 SFTP_PORT = int(os.getenv("SFTP_PORT", "22"))
@@ -560,7 +563,15 @@ def export_processed_emails_to_excel(batch_id: str, stop_event=None) -> Optional
         has_ai_reply = bool(reply_text.strip())
         needs_reply_duplicate = event_type_raw in ["invoice_request_no_info", "claims_paid_no_proof"]
         
-        if has_ai_reply and needs_reply_duplicate:
+        # Only create duplicate "_with_reply" row if:
+        # 1. Outbound event rows are enabled (ENABLE_OUTBOUND_EVENT_ROWS = True)
+        # 2. Email has AI reply
+        # 3. Event type needs duplicate
+        # 4. Email was actually sent (response_sent = True), not just a draft
+        email_was_sent = e.get("response_sent", False)
+        
+        if ENABLE_OUTBOUND_EVENT_ROWS and has_ai_reply and needs_reply_duplicate and email_was_sent:
+            # Email was sent - create duplicate row for outbound event
             # Create cleaned body with only reply text
             enhanced_cleaned_body = f"Reply:\n{reply_text}"
             
